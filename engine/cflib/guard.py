@@ -9,4 +9,4 @@ def after_backup(path, call, *args, **kwargs):
     try:
         return call(*args, **kwargs)
     except errors.ApiError as exc:
-        raise errors.ApiError("%s; backup: %s" % (exc.message, path))
+        raise errors.ApiError("%s; backup: %s" % (exc.message, path)) from exc

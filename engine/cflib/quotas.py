@@ -74,7 +74,7 @@ def require_room(zone, quota, used, what):
         refuse(zone, "%s quota is full (%d of %d)" % (what, used, limit))
 
 
-def purge_max(zone, kind):
-    if kind == "files" and key(zone) == "enterprise":
+def purge_max(zone, field):
+    if field == "files" and key(zone) == "enterprise":
         return PURGE_MAX_ENTERPRISE_FILES
-    return PURGE_MAX[kind]
+    return PURGE_MAX[field]

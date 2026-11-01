@@ -10,10 +10,10 @@ import http.client
 import json
 import os
 import time
-import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 from . import creds, errors
 

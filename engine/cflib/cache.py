@@ -44,7 +44,7 @@ def line(verb, rule):
 def _write(ctx, zone, entry, rules):
     """Save the entrypoint, then put the whole list back: (backup path, answer)."""
     path = rulesets.save(ctx, zone, CACHE, entry)
-    done = guard.after_backup(path, ctx.api.put, rulesets._path(zone, CACHE),
+    done = guard.after_backup(path, ctx.api.put, rulesets.entrypoint_path(zone, CACHE),
                               {"rules": [rulesets.body(r) for r in rules]})
     return path, done
 
@@ -55,7 +55,7 @@ def _in_zone(zone, host):
 
 def _host(zone, host):
     name = host.strip().lower().rstrip(".")
-    if not protect._HOST.match(name) or "*" in name:
+    if not protect.HOST.match(name) or "*" in name:
         raise errors.UsageError("%s is not a host" % host)
     if not _in_zone(zone, name):
         raise errors.UsageError("%s is not in %s" % (name, zone["name"]))
@@ -89,7 +89,7 @@ def cache_rule_add(args, ctx):
         expr, label = args.expression, "rule-add"
         description = args.description or "%s cache-rule-add" % rulesets.PREFIX
     else:
-        expr = protect.expression(protect._host_clause(host), protect._path_clause(args.path_prefix))
+        expr = protect.expression(protect.host_clause(host), protect.path_clause(args.path_prefix))
         label = " ".join(p for p in (host, args.path_prefix) if p)
         description = args.description or "%s cache %s" % (rulesets.PREFIX, label)
     params = {"cache": args.mode != "bypass"}

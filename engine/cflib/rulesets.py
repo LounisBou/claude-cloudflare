@@ -24,14 +24,14 @@ CUSTOM_ACTIONS = ("block", "challenge", "js_challenge", "managed_challenge", "lo
 COLUMNS = ["phase", "id", "action", "enabled", "description", "expression"]
 
 
-def _path(zone, phase):
+def entrypoint_path(zone, phase):
     return "/zones/%s/rulesets/phases/%s/entrypoint" % (zone["id"], phase)
 
 
 def read(ctx, zone, phase):
     """The zone's entrypoint of a phase, None while the zone has none."""
     try:
-        return ctx.api.get(_path(zone, phase))
+        return ctx.api.get(entrypoint_path(zone, phase))
     except errors.ApiError as exc:
         # A phase never written has no entrypoint: Cloudflare 10003.
         if exc.message.startswith("Cloudflare 10003:"):
@@ -64,7 +64,7 @@ def write(ctx, zone, phase, entry, rules):
     the backup's path and the entrypoint as Cloudflare now holds it."""
     path = save(ctx, zone, phase, entry)
     with ctx.backup.naming(path):
-        done = ctx.api.put(_path(zone, phase), {"rules": [body(r) for r in rules]})
+        done = ctx.api.put(entrypoint_path(zone, phase), {"rules": [body(r) for r in rules]})
     return path, done
 
 
