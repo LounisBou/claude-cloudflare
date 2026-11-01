@@ -159,10 +159,12 @@ class Settings:
             return False, "cannot run %s: %s" % (argv[0], exc.strerror)
         except subprocess.TimeoutExpired:
             return False, "caddy %s did not end within %d seconds" % (args[0], CALL_TIMEOUT)
+        hidden = masked(variables)
         if done.returncode == 0:
-            return True, done.stdout.decode("utf-8", "replace").strip()
-        return False, error_line(done.stderr.decode("utf-8", "replace") + "\n"
-                                 + done.stdout.decode("utf-8", "replace"), args[0], done.returncode)
+            return True, redact(done.stdout.decode("utf-8", "replace").strip(), hidden)
+        # Masked before error_line cuts it: a value cut in two would no longer be found.
+        return False, error_line(redact(done.stderr.decode("utf-8", "replace") + "\n"
+                                        + done.stdout.decode("utf-8", "replace"), hidden), args[0], done.returncode)
 
     def validate(self, variables):
         return self.call(["validate", "--config", self.caddyfile, "--adapter", "caddyfile"], variables)
@@ -190,13 +192,24 @@ def error_line(output, command, code):
     return line if len(line) <= 400 else line[:399] + "…"
 
 
+def masked(variables):
+    """The values worth masking among the envfile's."""
+    return {v for v in variables.values() if len(v) >= SECRET_MIN}
+
+
+def redact(text, values):
+    for value in values:
+        text = text.replace(value, "[token]")
+    return text
+
+
 def secrets(config):
     """The envfile's values, to keep them out of any output. Never fails: an
     unreadable envfile or a malformed section has nothing to mask."""
     envfile = config.caddy.get("envfile") if isinstance(config.caddy, dict) else None
     if not isinstance(envfile, str):
         return set()
-    return {v for v in creds.read_env_file(envfile).values() if len(v) >= SECRET_MIN}
+    return masked(creds.read_env_file(envfile))
 
 
 # ---- the probe ----

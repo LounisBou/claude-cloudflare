@@ -1894,6 +1894,27 @@ cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a value of the envfile that caddy echoes is masked" \
   "cf: caddy validate failed: Error: invalid token [token]; the Caddyfile is restored; backup: $(ls "$CADDYFILE".bak-*)" "$ERR"
 
+caddy_reset
+printf 'fail %s %s\n' "$(printf 'x%.0s' $(seq 1 380))" "$CADDY_TOKEN" > "$CSTATE/validate"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a value echoed across the cut of a long error line is masked before the cut" "0" \
+  "$(printf '%s' "$ERR" | grep -c "${CADDY_TOKEN:0:8}")"
+check_contains "…and the line keeps the mask" "x [token]; the Caddyfile is restored" "$ERR"
+
+caddy_reset
+printf 'fail loading config: bad token %s\n' "$CADDY_TOKEN" > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check_contains "a value of the envfile echoed by a reload is masked" \
+  "cf: caddy reload failed: Error: loading config: bad token [token]; the Caddyfile is restored" "$ERR"
+
+caddy_reset
+printf 'CF_API_TOKEN=%s\nSHORT=sevench\nLONGER=eightchr\n' "$CADDY_TOKEN" > "$CADDY/etc/short.env"
+caddy_config "$WORK/caddy-short.json" ", \"envfile\": \"$CADDY/etc/short.env\""
+printf 'fail short sevench long eightchr\n' > "$CSTATE/validate"
+CCONF="$WORK/caddy-short.json" cdyw caddy-site-set new.example.com --body-file "$BODY"
+check_contains "a value one character under the masking minimum is shown, one at the minimum is masked" \
+  "cf: caddy validate failed: Error: short sevench long [token];" "$ERR"
+
 echo "== end to end: a Caddy cycle through the tool's requests =="
 
 caddy_reset
