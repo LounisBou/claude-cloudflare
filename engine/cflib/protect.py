@@ -16,8 +16,11 @@ from . import errors, quotas, rulesets, zones
 _HOST = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 _COUNTRY = re.compile(r"^[A-Z]{2}$|^T1$")
 _PATH = re.compile(r"/[A-Za-z0-9._~/%+-]*")
-# Cloudflare refuses an expression past 4,096 characters.
+# A merge stops at 4,000 characters: Cloudflare refuses an expression past
+# 4,096, and the margin leaves room to edit the merged rule by hand afterwards.
 _MAX_EXPRESSION = 4000
+# Cloudflare's managed rulesets, by the ids it lists them under (GET
+# /zones/:id/rulesets, kind managed), the same on every zone.
 MANAGED_IDS = {
     "free": "77454fe2d30c4220b5701f6fdfb893ba",
     "cloudflare": "efb7b8c949ac4650a09736fc376e9aee",

@@ -177,12 +177,14 @@ protections share the five slots of a Free zone.
 
 A target is a host of one of the account's zones (`tm.example.com`), or a
 zone's name for the whole zone; a wildcard host (`*.example.com`) exits 2, as
-a rule on `http.host` never matches it: target the zone instead. Every write below reads the zone's whole
-entrypoint, changes only the rule it targets and puts the whole list back, so
-rules made in the dashboard stay as they were; it saves the entrypoint first
-(`backup: <path>`, kind `ruleset`) and `restore` replays it. A rule that
-already exists is left alone (`unchanged`). The rules the plugin creates have
-a description starting with `cf-plugin:`.
+a rule on `http.host` never matches it: target the zone instead. Every write
+below reads the zone's whole entrypoint, changes only the rule it targets and
+puts the whole list back, so rules made in the dashboard stay as they were; it
+saves the entrypoint first (`backup: <path>`, kind `ruleset`) and `restore`
+replays it. Such a backup keeps every rule of the phase, the dashboard's
+expressions included, in clear (file mode 0600). A rule that already exists is
+left alone (`unchanged`). The rules the plugin creates have a description
+starting with `cf-plugin:`.
 
 ### `rules <zone> [--phase custom|ratelimit|managed] [--plugin]` (read)
 
