@@ -13,6 +13,11 @@ SHOWN = {v: k for k, v in MODES.items()}
 COLUMNS = ["mode", "target", "value", "notes", "id"]
 _ASN = re.compile(r"^(?:AS)?(\d{1,10})$", re.I)
 _COUNTRY = re.compile(r"^[A-Za-z]{2}$|^T1$")
+# The ranges IP access rules take, by IP version
+# (developers.cloudflare.com/waf/tools/ip-access-rules/parameters/); a /32
+# IPv4 or a /128 IPv6 is one address.
+_PREFIXES = {4: (16, 24), 6: (32, 48, 64)}
+_ADDRESS = {4: "ip", 6: "ip6"}
 
 
 def _path(zone, rule=None):
@@ -24,11 +29,20 @@ def configuration(text):
     """The access rule configuration a target names: an IP, a CIDR range, AS<n> or a country code."""
     text = text.strip()
     try:
-        net = ipaddress.ip_network(text, strict=False) if "/" in text else ipaddress.ip_address(text)
+        net = ipaddress.ip_network(text, strict=False)
     except ValueError:
         net = None
     if net is not None:
-        return {"target": "ip_range" if "/" in text else "ip", "value": str(net)}
+        if net.prefixlen == net.max_prefixlen:
+            return {"target": _ADDRESS[net.version], "value": str(net.network_address)}
+        if net.prefixlen not in _PREFIXES[net.version]:
+            raise errors.UsageError("%s: IP access rules take IPv4 ranges of /16 or /24 and IPv6 ranges of /32, /48 or /64"
+                                    % text)
+        try:
+            ipaddress.ip_network(text)
+        except ValueError:
+            raise errors.UsageError("%s has host bits set: the range is %s" % (text, net))
+        return {"target": "ip_range", "value": str(net)}
     found = _ASN.match(text)
     if found and text.upper().startswith("AS"):
         return {"target": "asn", "value": "AS" + found.group(1)}
@@ -73,8 +87,8 @@ def ip_rules(args, ctx):
 # ---- writes ----
 
 def _set(ctx, args, mode):
-    zone = zones.find(ctx, args.zone)
     conf = configuration(args.target)
+    zone = zones.find(ctx, args.zone)
     rules = _all(ctx, zone)
     existing = next((r for r in rules if r.get("configuration") == conf), None)
     if existing and existing.get("mode") == mode:
@@ -144,7 +158,7 @@ def register(subparsers):
     for name, handler, what in (("ip-allow", ip_allow, "allow"), ("ip-block", ip_block, "block")):
         parser = subparsers.add_parser(name, help="%s an IP, a range, an AS number or a country" % what)
         parser.add_argument("zone")
-        parser.add_argument("target", help="203.0.113.7, 203.0.113.0/24, AS64500 or FR")
+        parser.add_argument("target", help="203.0.113.7, 2001:db8::7, 203.0.113.0/24 (/16, /24; IPv6 /32, /48, /64), AS64500 or FR")
         parser.add_argument("--note")
         parser.set_defaults(handler=handler)
 

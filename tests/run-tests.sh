@@ -861,6 +861,53 @@ check "the access rule is back, with the plugin's" "5" "$(printf '%s\n' "$OUT" |
 cfw restore "$ip_bk"
 check "restore of the first backup removes what was added since" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
 
+# last_body <method>: the path and the body (keys sorted) of the last request of this method.
+last_body() {
+  curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+r = [x for x in json.load(sys.stdin) if x["method"] == sys.argv[1]][-1]
+print(r["path"].replace("/client/v4", ""), json.dumps(r["body"], sort_keys=True))' "$1"
+}
+# backups_of <zone>: how many backups example.com's account holds for the zone.
+backups_of() { ls "$WORK/backups/alpha/$1" 2>/dev/null | wc -l | tr -d ' '; }
+ZONE_PATH=/zones/0123456789abcdef0123456789abcdef
+
+reset
+cfw ip-block example.com 2001:DB8::7 --note v6
+check "an IPv6 address is an ip6 target" "created	block	ip6	2001:db8::7	v6" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+check "the rule posted for an IPv6 address names target ip6" \
+  "$ZONE_PATH/firewall/access_rules/rules {\"configuration\": {\"target\": \"ip6\", \"value\": \"2001:db8::7\"}, \"mode\": \"block\", \"notes\": \"v6\"}" \
+  "$(last_body POST)"
+v6_id=$(printf '%s\n' "$OUT" | head -1 | cut -f6)
+cfw ip-allow example.com 2001:db8::7
+check "ip-allow over an IPv6 block patches that rule to allow" \
+  "$ZONE_PATH/firewall/access_rules/rules/$v6_id {\"mode\": \"whitelist\", \"notes\": \"v6\"}" "$(last_body PATCH)"
+cfw ip-block example.com 2001:db8::9/128
+check "an IPv6 /128 is one address" "created	block	ip6	2001:db8::9" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
+cfw ip-block example.com 203.0.113.9/32
+check "an IPv4 /32 is one address" "created	block	ip	203.0.113.9" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
+for range in 198.18.0.0/16 198.19.7.0/24 2001:db9::/32 2001:db8:2::/48 2001:db8:3:4::/64; do
+  cfw ip-block example.com "$range"
+  check "a $range range is an ip_range target" "created	block	ip_range" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-3)"
+done
+cfw ip-block example.com 2001:db9::/32
+check "an IPv6 range is matched as an existing rule" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
+for range in 0.0.0.0/0 ::/0 203.0.113.0/20 198.18.0.0/8 2001:db8::/56 2001:db8::/16; do
+  taken_before=$(backups_of example.com)
+  mark
+  cfw ip-block example.com "$range"
+  check "a $range range exits 2 naming the ranges IP access rules take" \
+    "2 cf: $range: IP access rules take IPv4 ranges of /16 or /24 and IPv6 ranges of /32, /48 or /64" "$CODE $ERR"
+  check "a refused $range range sends no write and takes no backup" "0 $taken_before" \
+    "$(since_mark | grep -vc '^GET') $(backups_of example.com)"
+done
+taken_before=$(backups_of example.com)
+mark
+cfw ip-allow example.com 203.0.113.7/24
+check "a range with host bits set exits 2" "2 cf: 203.0.113.7/24 has host bits set: the range is 203.0.113.0/24" "$CODE $ERR"
+check "a range with host bits set sends no write and takes no backup" "0 $taken_before" \
+  "$(since_mark | grep -vc '^GET') $(backups_of example.com)"
+
 echo "== end to end: a protection cycle on a Free zone at its quota =="
 
 # example.edu is Free and holds four dashboard rules of its five slots.
@@ -891,6 +938,17 @@ cfwj '{"command": "challenge", "account": "beta", "args": {"target": "www.exampl
 check "e2e: a write past the quota exits 5, naming the plan and the full quota" \
   "5 cf: plan Free Website: custom rules quota is full (5 of 5)" "$CODE $ERR"
 check "e2e: the refused write sent no change" "0" "$(sent | tail -n +$((reset_log_mark + 1)) | grep -vc '^GET')"
+cfwj '{"command": "ip-block", "account": "beta", "args": {"zone": "example.edu", "target": "2001:db8:abcd::/48", "note": "e2e"}}'
+check "e2e: ip-block takes an IPv6 range" "created	block	ip_range	2001:db8:abcd::/48	e2e" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+cfwj '{"command": "ip-block", "account": "beta", "args": {"zone": "example.edu", "target": "2001:db8:abcd::1"}}'
+check "e2e: ip-block takes an IPv6 address as an ip6 target" "created	block	ip6	2001:db8:abcd::1" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
+e2e_v6_bk=$(backup_of)
+cfj '{"command": "ip-rules", "account": "beta", "args": {"zone": "example.edu"}}'
+check "e2e: ip-rules shows both IPv6 rules" "$(printf 'block\tip_range\t2001:db8:abcd::/48\nblock\tip6\t2001:db8:abcd::1')" "$(col 1-3)"
+cfwj "{\"command\": \"restore\", \"account\": \"beta\", \"args\": {\"path\": \"$e2e_v6_bk\"}}"
+check "e2e: restore from the ip6 rule's backup deletes it" "deleted	block	ip6	2001:db8:abcd::1" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
+cfj '{"command": "ip-rules", "account": "beta", "args": {"zone": "example.edu"}}'
+check "e2e: the IPv6 range is left" "block	ip_range	2001:db8:abcd::/48" "$(col 1-3)"
 
 echo "== install.sh and the doctor =="
 

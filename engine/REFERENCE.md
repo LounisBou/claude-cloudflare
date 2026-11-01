@@ -229,8 +229,9 @@ Columns: `mode target value notes id`; `mode` is `allow` or `block`.
 
 ### `ip-allow <zone> <target> [--note N]` / `ip-block <zone> <target> [--note N]` (write)
 
-The target is an IP, a CIDR range, `AS64500` or a country code. An existing
-rule of the target changes its mode (`before` / `after`). Saves the zone's
+The target is an IPv4 or IPv6 address, a CIDR range (IPv4 `/16` or `/24`,
+IPv6 `/32`, `/48` or `/64`, host bits zero; any other prefix exits 2),
+`AS64500` or a country code. An existing rule of the target changes its mode (`before` / `after`). Saves the zone's
 access rules first (kind `ip-rules`).
 
 ### `ip-rule-delete <zone> <rule>` (write)
