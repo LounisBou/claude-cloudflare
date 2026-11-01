@@ -120,6 +120,9 @@ write it back with every other rule intact (rules made in the dashboard included
 2. Edit: the block whose address is exactly `https://<host>` or `<host>` is replaced/removed/appended;
    brace-aware parser; global options, snippets, `:80`, comments and every other block are kept
    byte-for-byte; a block with several addresses or a wildcard is refused (exit 5).
+   Wildcard ruling: a wildcard site block is refused even when it stands alone in its block
+   (`caddy-site-set`/`caddy-site-remove '*.example.com'` exit 5), while `caddy-site` reads it and a
+   host it covers gets a block of its own.
 3. `caddy validate --config <caddyfile>` with the envfile's variables in the **environment** of the
    child process (never argv). Failure → restore the copy, exit 6 with Caddy's error line.
 4. Probe « before » (taken before the edit): for every site host in the file, TLS handshake +
