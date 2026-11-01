@@ -16,9 +16,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cflib import accounts, backup, backups, config, context, creds, dns, errors, stdinjson, zones  # noqa: E402
+from cflib import (accounts, backup, backups, certs, config, context, creds, dns, errors, iprules, plan,  # noqa: E402
+                   protect, rulesets, security, settings, stdinjson, zones)
 
-_MODULES = (accounts, zones, dns, backups)
+_MODULES = (accounts, zones, dns, backups, settings, certs, plan, rulesets, iprules, security, protect)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
