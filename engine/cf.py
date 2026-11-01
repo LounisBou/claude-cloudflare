@@ -67,7 +67,8 @@ def _redact(text, secrets):
 
 
 def _fail(exc, secrets):
-    print("cf: " + _redact(exc.message, secrets), file=sys.stderr)
+    # One line whatever the message holds, Cloudflare's own included.
+    print("cf: " + " ".join(_redact(exc.message, secrets).split()), file=sys.stderr)
     return exc.code
 
 

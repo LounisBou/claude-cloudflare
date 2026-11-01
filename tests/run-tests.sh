@@ -232,6 +232,10 @@ check "a known account id filters the zones" "GET /zones?account.id=acc-alpha" "
 EXTRA_ENV="ALPHA_CLOUDFLARE_API_TOKEN=cf-wrong" cf zones
 check "an API failure exits 3" "3" "$CODE"
 check "an API failure is one line with Cloudflare's code" "cf: Cloudflare 10000: Authentication error" "$ERR"
+reset
+fail_next GET /zones 400 9999 'first line\n  second\tline'
+cf zones
+check "a Cloudflare message on several lines is printed on one" "3 cf: Cloudflare 9999: first line second line" "$CODE $ERR"
 
 EXTRA_ENV="CF_API_BASE=http://127.0.0.1:1/client/v4" cf zones
 check "an unreachable API exits 3" "3" "$CODE"
