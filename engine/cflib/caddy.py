@@ -1,8 +1,8 @@
 """The local Caddy: its site blocks, its state, the embedded digests of its
 documentation, and the cycle every change goes through.
 
-A change (caddy-site-set, caddy-site-remove, caddy-reload) runs the same
-steps: copy the Caddyfile beside itself; probe every site; edit the one block;
+A change (caddy-site-set, caddy-site-remove, caddy-reload) holds a lock for
+its whole cycle, one change at a time, and runs the same steps: copy the Caddyfile beside itself; probe every site; edit the one block;
 caddy validate, and on failure put the copy back; caddy reload; check the
 admin API answers; probe every site again. A site that answered and no longer
 does, a failed reload or a dead admin API put the copy back, validate and
@@ -23,6 +23,8 @@ from . import caddyctl, caddyfile, errors, fmt
 
 DOCS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "docs", "caddy")
 _TOPIC = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# In the config's backup_dir: the lock one change at a time holds.
+LOCK = "caddy.lock"
 
 
 def _status(code):
@@ -192,6 +194,11 @@ def cycle(ctx, edit, host=None, removing=False):
 def _cycle(ctx, edit, host, removing):
     settings = caddyctl.Settings(ctx.config)
     settings.deadline = caddyctl.Deadline()
+    with caddyctl.locked(os.path.join(ctx.config.backup_dir, LOCK), settings.deadline):
+        return _locked_cycle(settings, edit, host, removing)
+
+
+def _locked_cycle(settings, edit, host, removing):
     variables = settings.variables()
     original = settings.read()
     blocks, loose = caddyfile.parse(original)

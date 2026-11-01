@@ -11,7 +11,9 @@ reloaded.
 """
 
 import concurrent.futures
+import contextlib
 import datetime
+import fcntl
 import os
 import plistlib
 import re
@@ -39,6 +41,8 @@ CALL_TIMEOUT = 60
 BUDGET = 100
 RESERVE = 0.4
 ROLLBACK_MIN = 1
+# How long a change waits for another one to end, at most.
+LOCK_WAIT = 15
 # An envfile value shorter than this is no secret worth masking ("1", "info").
 SECRET_MIN = 8
 _STAMP = "%Y%m%dT%H%M%S.%fZ"
@@ -68,6 +72,29 @@ class Deadline:
         if self.rolling_back:
             return max(ROLLBACK_MIN, min(default, self.end - time.monotonic()))
         return min(default, self.steps_end - time.monotonic())
+
+
+@contextlib.contextmanager
+def locked(path, deadline):
+    """The lock file held for a whole change: one change at a time. Another
+    one holding it is waited for, LOCK_WAIT at most and within the deadline."""
+    try:
+        os.makedirs(os.path.dirname(path), 0o700, exist_ok=True)
+        fh = open(path, "a")
+    except OSError as exc:
+        raise errors.ConfigError("cannot open the lock %s: %s; nothing was changed" % (path, exc.strerror))
+    with fh:
+        waited = time.monotonic() + max(0, deadline.timeout(LOCK_WAIT))
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= waited:
+                    raise errors.Refused("another Caddy change is running (it holds %s): try again once it "
+                                         "ends; nothing was changed" % path)
+                time.sleep(0.1)
+        yield
 
 
 class Settings:

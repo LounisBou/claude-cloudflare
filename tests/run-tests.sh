@@ -2005,6 +2005,35 @@ check "…the rollback validated and reloaded the restored file" "validate reloa
 check "…and the whole cycle ended within the budget, not the reload's 30 seconds" "yes" \
   "$([ "$took" -le 5 ] && echo yes || echo "no: $took s")"
 
+# hold_lock: a process holding the Caddy lock until killed; its pid in HOLDER.
+hold_lock() {
+  rm -f "$WORK/held"
+  python3 -c 'import fcntl, os, sys, time
+os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
+fh = open(sys.argv[1], "a")
+fcntl.flock(fh, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(60)' "$WORK/backups/caddy.lock" "$WORK/held" &
+  HOLDER=$!
+  for _ in $(seq 1 50); do
+    [ -e "$WORK/held" ] && break
+    sleep 0.1
+  done
+}
+caddy_reset
+hold_lock
+started=$(date +%s)
+CADDY_EXTRA="CF_CADDY_BUDGET=3" cdyw caddy-site-set new.example.com --body-file "$BODY"
+took=$(( $(date +%s) - started ))
+kill "$HOLDER"
+wait "$HOLDER" 2>/dev/null
+check "a change while another holds the lock fails with exit 5 after a bounded wait" "5 yes" \
+  "$CODE $([ "$took" -le 4 ] && echo yes || echo "no: $took s")"
+check_contains "…saying another change runs" "cf: another Caddy change is running (it holds $WORK/backups/caddy.lock)" "$ERR"
+check "…nothing written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "once the lock is let go, the change runs" "0" "$CODE"
+
 check "no stop, restart or service command anywhere in the engine" "" \
   "$(grep -rnE 'brew services|systemctl (re)?start|systemctl stop|launchctl|caddy stop|"stop"|"restart"' "$ENGINE" 2>/dev/null)"
 
