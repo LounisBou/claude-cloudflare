@@ -4,7 +4,7 @@
 import json
 
 
-def _cell(value):
+def cell(value):
     if value is None or value == "":
         return "-"
     if isinstance(value, bool):
@@ -18,7 +18,7 @@ def table(rows, cols):
     if not rows:
         return ""
     lines = ["\t".join(cols)]
-    lines.extend("\t".join(_cell(row.get(col)) for col in cols) for row in rows)
+    lines.extend("\t".join(cell(row.get(col)) for col in cols) for row in rows)
     return "\n".join(lines)
 
 

@@ -106,7 +106,7 @@ def add_custom(ctx, zone, rule, merge=True):
             return rulesets.line("unchanged", have, rulesets.CUSTOM)
     if rule["action"] == "log" and quotas.key(zone) not in quotas.LOG_PLANS:
         quotas.refuse(zone, "the log action is not offered")
-    if len(rules) < quotas.limits(zone)["custom_rules"]:
+    if rulesets.count(entry) < quotas.limits(zone)["custom_rules"]:
         written = dict(rule, enabled=True)
         path, done = rulesets.write(ctx, zone, rulesets.CUSTOM, entry, rules + [written])
         return "%s\nbackup: %s" % (rulesets.line("created", rulesets.stored(done, written), rulesets.CUSTOM), path)
@@ -114,12 +114,12 @@ def add_custom(ctx, zone, rule, merge=True):
                    and r.get("action") == rule["action"] and not r.get("action_parameters")
                    and not r.get("ratelimit")), None)
     if target is None:
-        quotas.require_room(zone, "custom_rules", len(rules), "custom rules")
+        quotas.require_room(zone, "custom_rules", rulesets.count(entry), "custom rules")
     merged = dict(target, expression="(%s) or (%s)" % (target["expression"], rule["expression"]),
                   description="%s | %s" % (target["description"], rule["description"][len(rulesets.PREFIX):].strip()))
     if len(merged["expression"]) > _MAX_EXPRESSION:
         quotas.refuse(zone, "custom rules quota is full (%d of %d) and the plugin's %s rule is too long to take another"
-                      % (len(rules), quotas.limits(zone)["custom_rules"], rule["action"]))
+                      % (rulesets.count(entry), quotas.limits(zone)["custom_rules"], rule["action"]))
     path, _ = rulesets.write(ctx, zone, rulesets.CUSTOM, entry,
                              [merged if r.get("id") == target["id"] else r for r in rules])
     return "%s\n%s\nbackup: %s" % (rulesets.line("before", target, rulesets.CUSTOM),
@@ -194,7 +194,7 @@ def rate_limit(args, ctx):
     for have in rules:
         if _same_rule(have, rule):
             return rulesets.line("unchanged", have, rulesets.RATE)
-    quotas.require_room(zone, "rate_limit_rules", len(rules), "rate limiting rules")
+    quotas.require_room(zone, "rate_limit_rules", rulesets.count(entry), "rate limiting rules")
     written = dict(rule, enabled=True)
     path, done = rulesets.write(ctx, zone, rulesets.RATE, entry, rules + [written])
     return "%s\nbackup: %s" % (rulesets.line("created", rulesets.stored(done, written), rulesets.RATE), path)

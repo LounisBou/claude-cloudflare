@@ -5,7 +5,6 @@ a backup. security_level is changed through security-level and under-attack
 only, so that the emergency mode keeps its own permission ask.
 """
 
-import argparse
 import json
 import re
 
@@ -70,12 +69,12 @@ def apply(ctx, zone, setting, value):
         raise errors.UsageError("%s takes %s" % (setting, ", ".join(allowed)))
     current = ctx.api.get(_path(zone, setting))["value"]
     if current == value:
-        return "unchanged\t%s\t%s" % (setting, fmt._cell(_compact(value)))
+        return "unchanged\t%s\t%s" % (setting, fmt.cell(_compact(value)))
     path = save(ctx, zone, {setting: current})
     with ctx.backup.naming(path):
         ctx.api.patch(_path(zone, setting), {"value": value})
     return "changed\t%s\t%s\t%s\nbackup: %s" % (
-        setting, fmt._cell(_compact(current)), fmt._cell(_compact(value)), path)
+        setting, fmt.cell(_compact(current)), fmt.cell(_compact(value)), path)
 
 
 # ---- reads ----
@@ -138,7 +137,7 @@ def restore(ctx, saved):
     with ctx.backup.naming(path):
         for setting in sorted(changes):
             ctx.api.patch(_path(zone, setting), {"value": data["settings"][setting]})
-            lines.append("restored\t%s\t%s" % (setting, fmt._cell(_compact(data["settings"][setting]))))
+            lines.append("restored\t%s\t%s" % (setting, fmt.cell(_compact(data["settings"][setting]))))
     return lines + ["backup: " + path]
 
 

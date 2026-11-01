@@ -574,7 +574,6 @@ check "e2e: the TXT added since survives the restore" \
 
 echo "== zone settings, certificates, plan =="
 
-ZC=0123456789abcdef0123456789abcdef
 # last_put <path suffix>: the rules of the last PUT sent to a path, one "action expression" per line.
 last_put() {
   curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
@@ -936,7 +935,7 @@ cfw ip-block example.com 203.0.113.0/24
 check "the same access rule twice changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
 cfw ip-allow example.com 203.0.113.0/24
 check "ip-allow over a block changes its mode" "before	block	ip_range	203.0.113.0/24	scanner" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
-check "…to allow" "after	allow	ip_range	203.0.113.0/24	scanner" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1-5)"
+check "ip-allow over a block shows the rule after it, allowed" "after	allow	ip_range	203.0.113.0/24	scanner" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1-5)"
 cfw ip-block example.com AS64500
 check "an AS number is a target" "created	block	asn	AS64500" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
 cfw ip-block example.com ru
@@ -1073,8 +1072,7 @@ mark
 cfwj '{"command": "allow-only-countries", "account": "beta", "args": {"target": "api.example.edu", "countries": ["FR"]}}'
 check "e2e: allow-only-countries merges under the quota" "before	custom	block" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4)"
 check "e2e: the merge keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.edu http_request_firewall_custom)"
-check "e2e: …into one rule" "merged" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1)"
-e2e_merge_bk=$(backup_of)
+check "e2e: allow-only-countries merges into the plugin's block rule" "merged" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1)"
 cfj '{"command": "rules", "account": "beta", "args": {"zone": "example.edu"}}'
 check "e2e: rules shows five rules, four of them the dashboard's" "5 4" "$(printf '%s\n' "$OUT" | sed 1d | wc -l | tr -d ' ') $(printf '%s\n' "$OUT" | grep -c 'dashboard:')"
 check "e2e: the merged rule carries both hosts" "2" \

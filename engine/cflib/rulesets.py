@@ -43,6 +43,11 @@ def rules_of(entry):
     return list((entry or {}).get("rules") or [])
 
 
+def count(entry):
+    """How many rules an entrypoint holds (none read, none held)."""
+    return len(rules_of(entry))
+
+
 def body(rule):
     """A rule as Cloudflare takes it back."""
     return {k: v for k, v in rule.items() if k not in _READ_ONLY}

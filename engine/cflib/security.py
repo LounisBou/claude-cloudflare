@@ -13,10 +13,6 @@ def _bot_path(zone):
     return "/zones/%s/bot_management" % zone["id"]
 
 
-def _count(ctx, zone, phase):
-    return len(rulesets.rules_of(rulesets.read(ctx, zone, phase)))
-
-
 # ---- reads ----
 
 def security(args, ctx):
@@ -27,9 +23,9 @@ def security(args, ctx):
             {"item": "browser_check", "value": values.get("browser_check")},
             {"item": "challenge_ttl", "value": values.get("challenge_ttl")},
             {"item": "bot_fight_mode", "value": "on" if bot.get(_BOT_FIELD) else "off"},
-            {"item": "custom_rules", "value": _count(ctx, zone, rulesets.CUSTOM)},
-            {"item": "rate_limit_rules", "value": _count(ctx, zone, rulesets.RATE)},
-            {"item": "managed_rules", "value": _count(ctx, zone, rulesets.MANAGED)},
+            {"item": "custom_rules", "value": rulesets.count(rulesets.read(ctx, zone, rulesets.CUSTOM))},
+            {"item": "rate_limit_rules", "value": rulesets.count(rulesets.read(ctx, zone, rulesets.RATE))},
+            {"item": "managed_rules", "value": rulesets.count(rulesets.read(ctx, zone, rulesets.MANAGED))},
             {"item": "ip_access_rules",
              "value": len(ctx.api.get("/zones/%s/firewall/access_rules/rules" % zone["id"]) or [])}]
     if args.json:

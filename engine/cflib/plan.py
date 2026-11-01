@@ -3,22 +3,20 @@
 from . import fmt, quotas, rulesets, zones
 
 
-def count(ctx, zone, phase):
-    return len(rulesets.rules_of(rulesets.read(ctx, zone, phase)))
-
-
 def plan(args, ctx):
     zone = zones.find(ctx, args.zone)
-    q = quotas.limits(zone)
+    limits = quotas.limits(zone)
     rows = [
         {"item": "plan", "value": quotas.name(zone), "limit": None},
-        {"item": "custom_rules", "value": count(ctx, zone, rulesets.CUSTOM), "limit": q["custom_rules"]},
-        {"item": "rate_limit_rules", "value": count(ctx, zone, rulesets.RATE), "limit": q["rate_limit_rules"]},
-        {"item": "managed_rulesets", "value": ",".join(q["managed"]), "limit": None},
-        {"item": "bot_product", "value": q["bot"], "limit": None},
+        {"item": "custom_rules", "value": rulesets.count(rulesets.read(ctx, zone, rulesets.CUSTOM)),
+         "limit": limits["custom_rules"]},
+        {"item": "rate_limit_rules", "value": rulesets.count(rulesets.read(ctx, zone, rulesets.RATE)),
+         "limit": limits["rate_limit_rules"]},
+        {"item": "managed_rulesets", "value": ",".join(limits["managed"]), "limit": None},
+        {"item": "bot_product", "value": limits["bot"], "limit": None},
     ]
     if args.json:
-        return fmt.as_json({"zone": zone["name"], "plan": quotas.name(zone), "quotas": q, "used": {
+        return fmt.as_json({"zone": zone["name"], "plan": quotas.name(zone), "quotas": limits, "used": {
             "custom_rules": rows[1]["value"], "rate_limit_rules": rows[2]["value"]}})
     return fmt.table(rows, ["item", "value", "limit"])
 
