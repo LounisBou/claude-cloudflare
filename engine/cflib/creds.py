@@ -83,6 +83,13 @@ def token(account):
     return value
 
 
+def redact(text, secrets):
+    """The text with every one of the secrets replaced by [token]."""
+    for secret in secrets:
+        text = text.replace(secret, "[token]")
+    return text
+
+
 def secrets(env_files):
     """Every Cloudflare token value the process can see, to keep them out of any output."""
     values = set()

@@ -14,6 +14,7 @@ FIXTURES="$ROOT/tests/fixtures"
 WORK=$(mktemp -d)
 SERVER_PID=""
 WORLD_PID=""
+RESOLVER_PID=""
 
 OTHER_PID=""
 
@@ -21,6 +22,7 @@ stop() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
   [ -n "$OTHER_PID" ] && kill "$OTHER_PID" 2>/dev/null && wait "$OTHER_PID" 2>/dev/null
   [ -n "$WORLD_PID" ] && kill "$WORLD_PID" 2>/dev/null && wait "$WORLD_PID" 2>/dev/null
+  [ -n "$RESOLVER_PID" ] && kill "$RESOLVER_PID" 2>/dev/null && wait "$RESOLVER_PID" 2>/dev/null
   rm -rf "$WORK"
 }
 trap stop EXIT
@@ -54,6 +56,14 @@ TOKEN_ALPHA=cf-fixture-token-alpha-7f3a9c2e
 TOKEN_BETA=cf-fixture-token-beta-41d08b6a
 # Gamma's token sees two accounts, alpha's and its own.
 TOKEN_GAMMA=cf-fixture-token-gamma-9b2e5d17
+# Tokens the doctor reads the policies of: each write under its dashboard name;
+# names a prefix match would take for DNS Write and Cache Purge; Cache Purge alone.
+TOKEN_IOTA=cf-fixture-token-iota-0c5e7d13
+TOKEN_DELTA=cf-fixture-token-delta-9a2b4f60
+TOKEN_EPSILON=cf-fixture-token-epsilon-3d7e1a85
+# A token of an account with no zone, and one that reads its policies on its account only.
+TOKEN_ZETA=cf-fixture-token-zeta-58c0e2b7
+TOKEN_ETA=cf-fixture-token-eta-1f6a93d4
 
 # A second server on another port is where a redirect points: it must never
 # be reached.
@@ -101,10 +111,11 @@ print(json.dumps(eval(sys.argv[1]), sort_keys=True))' "$1"
 plant() {
   curl -fsS -X POST "http://127.0.0.1:$PORT/__script" -H 'Content-Type: application/json' -d "$1" >/dev/null
 }
-# fail_next <method> <path suffix> <status> <code> <message>
+# fail_next <method> <path suffix> <status> <code> <message> [skip]: the next
+# matching request fails, or the one after [skip] matching requests passed.
 fail_next() {
   curl -fsS -X POST "http://127.0.0.1:$PORT/__fail" -H 'Content-Type: application/json' \
-    -d "{\"method\":\"$1\",\"path\":\"$2\",\"status\":$3,\"code\":$4,\"message\":\"$5\"}" >/dev/null
+    -d "{\"method\":\"$1\",\"path\":\"$2\",\"status\":$3,\"code\":$4,\"message\":\"$5\",\"skip\":${6:-0}}" >/dev/null
 }
 
 # redirect_next <method> <path suffix> <status> <location>
@@ -147,12 +158,14 @@ echo "== manifests =="
 
 check "plugin name" "cloudflare" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' "$ROOT/.claude-plugin/plugin.json")"
-check "plugin version" "0.4.0" \
+check "plugin version" "0.5.0" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$ROOT/.claude-plugin/plugin.json")"
 check "plugin license" "MIT" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["license"])' "$ROOT/.claude-plugin/plugin.json")"
-check "marketplace lists the plugin at the same version" "cloudflare 0.4.0" \
+check "marketplace lists the plugin at the same version" "cloudflare 0.5.0" \
   "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["plugins"][0]; print(p["name"], p["version"])' "$ROOT/.claude-plugin/marketplace.json")"
+check "marketplace describes the plugin as plugin.json does" "same" \
+  "$(python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))["description"]; b=json.load(open(sys.argv[2]))["plugins"][0]["description"]; print("same" if a == b else b)' "$ROOT/.claude-plugin/plugin.json" "$ROOT/.claude-plugin/marketplace.json")"
 check "hooks.json names the module" "./register.ts" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["modules"][0])' "$ROOT/hooks/hooks.json")"
 
@@ -1454,6 +1467,42 @@ cfw worker-domain-add tm2.example.com nope
 check "a domain for an unknown script exits 2" "2" "$CODE"
 check "…and sends no write" "" "$(writes)"
 
+reset
+cf worker-domains
+check "worker-domains lists the account's custom domains" \
+  "$(printf 'id\thostname\tservice\tzone_name\ndom-legacy\tlegacy.example.com\thello\texample.com\ndom-net\tapp.example.net\thello\texample.net')" "$OUT"
+cf worker-domains example.com
+check "worker-domains <zone> lists the zone's alone" "legacy.example.com" "$(col 2)"
+check "…asking Cloudflare for the zone's" "zone_id=0123456789abcdef0123456789abcdef" "$(sent | grep '/workers/domains' | tail -1 | sed 's/.*?//')"
+cf worker-domains --json
+check "worker-domains --json gives the objects" "legacy.example.com app.example.net" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(" ".join(d["hostname"] for d in json.load(sys.stdin)))')"
+reset
+cfw worker-domain-delete nope.example.com
+check "worker-domain-delete of an unknown domain exits 2, naming it" "2 cf: no custom domain nope.example.com on account alpha" "$CODE $ERR"
+check "…writing nothing, and taking no backup" " 0" \
+  "$(sent | grep -v '^GET') $(ls "$WORK/backups/alpha/example.com/"*-worker-domain.json 2>/dev/null | wc -l | tr -d ' ')"
+cfw worker-domain-delete Legacy.Example.com
+check "worker-domain-delete detaches the hostname, after its backup" \
+  "deleted	legacy.example.com	hello	example.com" "$(printf '%s\n' "$OUT" | head -1)"
+domain_bk=$(backup_of)
+check "…one write: the domain's deletion" "DELETE /accounts/acc-alpha/workers/domains/dom-legacy" "$(sent | grep -v '^GET')"
+check "…its backup of kind worker-domain, under the zone, holding the domain" "worker-domain example.com legacy.example.com hello" \
+  "$(python3 -c 'import json,sys; b=json.load(open(sys.argv[1])); print(b["kind"], b["zone"], b["data"]["domain"]["hostname"], b["data"]["domain"]["service"])' "$domain_bk")"
+cf worker-domains
+check "…the other domains kept" "app.example.net" "$(col 2)"
+cfw restore "$domain_bk"
+check "restore attaches the deleted domain again" "restored	legacy.example.com	hello	example.com" "$(printf '%s\n' "$OUT" | head -1)"
+check "…by one PUT of its hostname, script and zone" \
+  '{"hostname": "legacy.example.com", "service": "hello", "zone_id": "0123456789abcdef0123456789abcdef", "zone_name": "example.com"}' \
+  "$(last_body PUT /workers/domains)"
+cf worker-domains
+check "…beside the others" "app.example.net legacy.example.com" "$(col 2 | sort | tr '\n' ' ' | sed 's/ $//')"
+cfw restore "$domain_bk"
+check "…and a second restore has nothing to do" "0 nothing to restore" "$CODE $(printf '%s' "$OUT" | cut -c1-18)"
+cf worker-domain-delete app.example.net
+check "worker-domain-delete is a write: cf.py refuses it" "2 cf: worker-domain-delete writes: use cf-write.py" "$CODE $ERR"
+
 echo "== end to end: a cache and Workers cycle =="
 
 reset
@@ -1492,8 +1541,15 @@ echo "== Caddy: the fixtures =="
 CADDY="$WORK/caddy"
 CSTATE="$CADDY/state"
 mkdir -p "$CADDY/etc" "$CSTATE" "$CADDY/bin"
-openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=example.com -days 2 \
-  -keyout "$CADDY/key.pem" -out "$CADDY/cert.pem" >/dev/null 2>&1 || { echo "openssl could not make the fixture certificate"; exit 1; }
+# The sites' certificate is issued by a fixture CA, which check trusts
+# through SSL_CERT_FILE; the probe of the cycle does not verify it.
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:example.com,DNS:*.example.com\nauthorityKeyIdentifier=keyid\n' > "$CADDY/leaf.ext"
+{ openssl req -x509 -newkey rsa:2048 -nodes -subj "/O=Fixture Trust/CN=Fixture CA" -days 2 \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" -keyout "$CADDY/ca-key.pem" -out "$CADDY/ca.pem" \
+  && openssl req -newkey rsa:2048 -nodes -subj /CN=example.com -keyout "$CADDY/key.pem" -out "$CADDY/leaf.csr" \
+  && openssl x509 -req -in "$CADDY/leaf.csr" -CA "$CADDY/ca.pem" -CAkey "$CADDY/ca-key.pem" -CAcreateserial \
+    -days 2 -extfile "$CADDY/leaf.ext" -out "$CADDY/cert.pem"; } >/dev/null 2>&1 \
+  || { echo "openssl could not make the fixture certificates"; exit 1; }
 printf '{"alive": true, "sites": {}}\n' > "$CSTATE/world.json"
 python3 "$FIXTURES/caddy/world.py" "$CSTATE" "$CADDY/cert.pem" "$CADDY/key.pem" "$CADDY/ports" &
 WORLD_PID=$!
@@ -2308,6 +2364,672 @@ cat "$WORK/out" "$WORK/err" >> "$CAPTURED"
 CCONF="$WORK/caddy-noenv.json" cdyj '{"command": "caddy-status"}'
 check_contains "e2e: caddy-status warns of the service without its envfile" "warning: $CADDY/noenv.plist does not start caddy with --envfile" "$OUT"
 
+echo "== check =="
+
+# A fake public resolver (tests/fixtures/resolver.py) answers from names.json;
+# its addresses lead to the fake running Caddy, reached on its TLS port through
+# CF_CHECK_PORT, whose certificate the fixture CA (SSL_CERT_FILE) vouches for.
+# Nothing is resolved through 1.1.1.1 and no port 443 is probed.
+NAMES="$WORK/names.json"
+printf '{"app.example.com": ["127.0.0.1"], "www.example.com": ["127.0.0.1"], "new.example.com": ["127.0.0.1"], "two.example.com": ["127.0.0.1", "127.0.0.2"], "broken.example.com": "servfail", "example.com": ["127.0.0.1"], "orphan.example.com": ["127.0.0.1"], "svc.example.com": ["127.0.0.1"], "v6.example.com": ["::1"], "empty.example.com": "empty", "refused.example.com": "refused", "wrongid.example.com": "wrong-id", "truncated.example.com": "truncated", "slow.example.com": {"delay": 4, "addresses": ["127.0.0.1"]}, "slower.example.com": {"delay": 8, "addresses": ["127.0.0.1"]}}\n' > "$NAMES"
+python3 "$FIXTURES/resolver.py" "$NAMES" "$WORK/dns-port" &
+RESOLVER_PID=$!
+for _ in $(seq 1 50); do
+  [ -s "$WORK/dns-port" ] && break
+  sleep 0.1
+done
+DNS_PORT=$(cat "$WORK/dns-port" 2>/dev/null)
+[ -n "$DNS_PORT" ] || { echo "the fake resolver did not start"; exit 1; }
+ISSUER="Fixture Trust (Fixture CA)"
+EXPIRES=$(python3 -c 'import ssl, sys, time; print(time.strftime("%Y-%m-%d", time.gmtime(ssl.cert_time_to_seconds(sys.argv[1]))))' \
+  "$(openssl x509 -enddate -noout -in "$CADDY/cert.pem" | cut -d= -f2)")
+# A port nothing listens on, for a site that refuses connections.
+CLOSED_PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+# check_env: what a check, a publish or an inventory adds to the Caddy runs'.
+check_env() {
+  printf '%s CF_RESOLVER=%s CF_CHECK_PORT=%s %s' "$(caddy_env)" "${CHECK_RESOLVER:-127.0.0.1:$DNS_PORT}" \
+    "${CHECK_PORT:-$TLS_PORT}" "${CHECK_CA-SSL_CERT_FILE=$CADDY/ca.pem}"
+}
+pub() { EXTRA_ENV="$(check_env)" cf "$@"; }
+pubw() { EXTRA_ENV="$(check_env)" cfw "$@"; }
+pubj() { EXTRA_ENV="$(check_env)" cfj "$1"; }
+pubwj() { EXTRA_ENV="$(check_env)" cfwj "$1"; }
+# resolved: the names the fake resolver was asked since the last caddy_reset.
+resolved() { [ -f "$NAMES.log" ] && tr '\n' ' ' < "$NAMES.log" | sed 's/ $//'; }
+CHECK_HEAD="$(printf 'host\taddress\thttps\tissuer\texpires')"
+
+caddy_reset
+rm -f "$NAMES.log"
+reset
+pub check app.example.com
+check "check resolves the host publicly, then gives its HTTPS status, issuer and expiry, in one line" \
+  "$(printf '%s\napp.example.com\t127.0.0.1\t200\t%s\t%s' "$CHECK_HEAD" "$ISSUER" "$EXPIRES")" "$OUT"
+check "…asking the resolver it is given" "app.example.com" "$(resolved)"
+check "…with no API call and no caddy run" " " "$(sent) $(calls)"
+pub check HTTPS://App.Example.com.
+check "check reads a host without regard to case or an https:// prefix" "app.example.com	127.0.0.1	200" "$(printf '%s\n' "$OUT" | sed 1d | cut -f1-3)"
+pub check new.example.com
+check "a host whose TLS handshake fails is down, with no certificate" "new.example.com	127.0.0.1	down (tls)	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check nothere.example.com
+check "a name the resolver does not know is nxdomain, and nothing is connected" "nothere.example.com	nxdomain	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check broken.example.com
+check "a resolver failure is named" "broken.example.com	servfail	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check two.example.com
+check "every address is given, the first one is connected" "two.example.com	127.0.0.1,127.0.0.2	down (tls)" "$(printf '%s\n' "$OUT" | sed 1d | cut -f1-3)"
+printf '{"alive": true, "sites": {"app.example.com": 502}}\n' > "$CSTATE/world.json"
+pub check app.example.com
+check "a site answering 502 gives its status and its certificate" "app.example.com	127.0.0.1	502	$ISSUER	$EXPIRES" "$(printf '%s\n' "$OUT" | sed 1d)"
+caddy_reset
+CHECK_CA= pub check app.example.com
+check_contains "a certificate no trusted authority issued is untrusted, with the reason" "app.example.com	127.0.0.1	untrusted (" "$OUT"
+check "…and the command still exits 0" "0" "$CODE"
+CHECK_PORT=$CLOSED_PORT pub check app.example.com
+check "a site refusing the connection is down" "app.example.com	127.0.0.1	down (connect)	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+CHECK_RESOLVER=127.0.0.1:$CLOSED_PORT pub check app.example.com
+check "a resolver that does not answer is named" "app.example.com	no resolver	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check app.example.com --json
+check "check --json gives the whole result" "app.example.com 127.0.0.1 200 $EXPIRES" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["host"], ",".join(c["addresses"]), c["https"], c["expires"])')"
+pubj '{"command": "check", "args": {"host": "www.example.com"}}'
+check "check through the tool's request" "www.example.com	127.0.0.1	200" "$(printf '%s\n' "$OUT" | sed 1d | cut -f1-3)"
+pub check 'bad host'
+check "check refuses a host that is not a name" "2" "$CODE"
+pubw check app.example.com
+check "check is a read: cf-write.py refuses it" "2 cf: check only reads: use cf.py" "$CODE $ERR"
+
+# The answers of a resolver that is wrong, or slow, and a host with no A.
+rm -f "$NAMES.log"
+pub check v6.example.com
+check "a host with no A falls back to its AAAA" "v6.example.com	::1	down (connect)" "$(printf '%s\n' "$OUT" | sed 1d | cut -f1-3)"
+check "…asking for the AAAA once the A has no answer" "v6.example.com v6.example.com/AAAA" "$(resolved)"
+pub check empty.example.com
+check "an answer with no record, to either query, is no answer" "empty.example.com	no answer	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check refused.example.com
+check "an answer code other than NXDOMAIN is named" "refused.example.com	refused	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check wrongid.example.com
+check "an answer to another query id is a bad answer, and nothing is connected" "wrongid.example.com	bad answer	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check truncated.example.com
+check "an answer cut short is a bad answer" "truncated.example.com	bad answer	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+pub check slow.example.com
+check "a resolver slower than the timeout is named" "slow.example.com	resolver timeout	-	-	-" "$(printf '%s\n' "$OUT" | sed 1d)"
+check "…and every one of them exits 0" "0" "$CODE"
+check "no name check asks for is a wildcard: check.run skips one, asking nothing" "*.example.com	wildcard: not checked " \
+  "$(rm -f "$NAMES.log"; env -i PATH="$PATH" $(check_env) python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from cflib import check; r = check.run(["*.example.com"])["*.example.com"]; print(r["host"] + "\t" + r["resolution"])' "$ENGINE") $(resolved)"
+
+# A certificate past its date, issued by the fixture CA, on a listener that
+# takes one connection and ends.
+openssl x509 -req -in "$CADDY/leaf.csr" -CA "$CADDY/ca.pem" -CAkey "$CADDY/ca-key.pem" -CAcreateserial \
+  -not_before 20200101000000Z -not_after 20200102000000Z -extfile "$CADDY/leaf.ext" -out "$CADDY/expired.pem" >/dev/null 2>&1
+if [ -s "$CADDY/expired.pem" ]; then
+  python3 - "$CADDY/expired.pem" "$CADDY/key.pem" "$WORK/once-port" <<'PYONCE' &
+import os, socket, ssl, sys
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(sys.argv[1], sys.argv[2])
+server = socket.socket()
+server.bind(("127.0.0.1", 0))
+server.listen(1)
+server.settimeout(20)
+with open(sys.argv[3] + ".tmp", "w") as fh:
+    fh.write(str(server.getsockname()[1]))
+os.replace(sys.argv[3] + ".tmp", sys.argv[3])
+try:
+    conn, _ = server.accept()
+    context.wrap_socket(conn, server_side=True).close()
+except (OSError, ssl.SSLError):
+    pass
+PYONCE
+  ONCE_PID=$!
+  for _ in $(seq 1 50); do
+    [ -s "$WORK/once-port" ] && break
+    sleep 0.1
+  done
+  CHECK_PORT=$(cat "$WORK/once-port") pub check app.example.com
+  wait "$ONCE_PID"
+  check "a certificate past its date is untrusted, saying so" "app.example.com	127.0.0.1	untrusted (certificate has expired)	-	-" \
+    "$(printf '%s\n' "$OUT" | sed 1d)"
+else
+  echo "  skip the expired certificate: openssl cannot set the dates (-not_before, -not_after)"
+fi
+
+echo "== publish =="
+
+ZID=0123456789abcdef0123456789abcdef
+DNSBK="$WORK/backups/alpha/example.com"
+# with_keys <config> <copy> <json object>: the config with these top-level keys.
+with_keys() {
+  python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); c.update(json.loads(sys.argv[3])); json.dump(c, open(sys.argv[2], "w"))' "$1" "$2" "$3"
+}
+PUB_CONFIG="$WORK/publish-config.json"
+with_keys "$CADDY_CONFIG" "$PUB_CONFIG" '{"default_target": "203.0.113.10"}'
+# mark / writes: the requests that are not reads, sent since the last mark.
+mark() { MARK=$(sent | wc -l | tr -d ' '); }
+writes() { sent | tail -n +$((MARK + 1)) | grep -v '^GET' | sed 's,/[0-9a-f]\{32\}$,/<id>,'; }
+# expected_new <file> <host> <upstream> [extra lines]: the fixture Caddyfile with
+# the block publish appends.
+expected_new() {
+  { cat "$ORIGINAL"; printf '\nhttps://%s {\n\timport tls_config\n\tlog\n\treverse_proxy %s\n' "$2" "$3"; [ -n "${4:-}" ] && printf '%s\n' "$4"; printf '}\n'; } > "$1"
+}
+nth() { printf '%s\n' "$OUT" | sed -n "$1p"; }
+# pub_reset: the fixture Caddyfile and zone back, no backup of example.com, the mark at 0.
+pub_reset() { caddy_reset; reset; rm -rf "$DNSBK"; MARK=0; }
+www_id() { CCONF="$PUB_CONFIG" pub dns-get example.com www --json; printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])'; }
+CCONF="$PUB_CONFIG"
+
+pub_reset
+pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check "publish creates the A record, proxied, then the block, then checks the host" "0" "$CODE"
+check "…the record line" "created	A	new.example.com	203.0.113.50	yes	auto" "$(nth 1 | cut -f1-6)"
+check "…the record's backup" "backup: $(ls "$DNSBK"/*-dns.json)" "$(nth 2)"
+check "…the Caddy cycle's lines and copy" "$(printf 'new.example.com\tdown→200\nbackup: %s' "$(ls "$CADDYFILE".bak-*)")" "$(nth 3,4)"
+check "…then the check of the host" "$(printf '%s\nnew.example.com\t127.0.0.1\t200\t%s\t%s' "$CHECK_HEAD" "$ISSUER" "$EXPIRES")" "$(nth 5,6)"
+expected_new "$WORK/expected-publish" new.example.com 127.0.0.1:8080
+check "…the block in C5's shape appended, every other byte kept" "same" "$(same "$CADDYFILE" "$WORK/expected-publish")"
+check "…one write to Cloudflare" "POST /zones/$ZID/dns_records" "$(writes)"
+check "…one validate and one reload" "validate reload" "$(calls)"
+pub dns-get example.com new
+check "…the record is there" "A	new.example.com	203.0.113.50	yes	auto" "$(lines)"
+
+pub_reset
+pubw publish www.example.com --to http://127.0.0.1:9000
+check "publish on a record already right writes no record and takes no backup of it" \
+  "unchanged	A	www.example.com	203.0.113.10	yes	auto" "$(nth 1 | cut -f1-6)"
+check "…without --ip, the config's default_target" "" "$(writes)"
+check "…and no backup of the record is written" "absent" "$(test ! -e "$DNSBK" && echo absent || ls "$DNSBK")"
+check "…the block of the host is replaced, its address kept" \
+  "$(printf 'www.example.com {\n\timport tls_config\n\tlog\n\treverse_proxy http://127.0.0.1:9000\n}')" \
+  "$(sed -n '/^www.example.com {/,/^}/p' "$CADDYFILE")"
+check "…no status changed: the cycle prints its copy alone" "backup: $(ls "$CADDYFILE".bak-*)" "$(nth 2)"
+
+pub_reset
+pubw publish www.example.com --to 8080 --ip 203.0.113.60 --no-proxy
+check "publish updates the A record: content and proxy" \
+  "$(printf 'before\tA\twww.example.com\t203.0.113.10\tyes\nafter\tA\twww.example.com\t203.0.113.60\tno')" "$(nth 1,2 | cut -f1-5)"
+check "…one write, on that record" "PUT /zones/$ZID/dns_records/<id>" "$(writes)"
+check "…and names its backup" "backup: $(ls "$DNSBK"/*-dns.json | tail -1)" "$(nth 3)"
+
+pub_reset
+printf 'encode gzip\nheader X-Frame-Options DENY\n' > "$WORK/extra.caddy"
+pubw publish new.example.com --to 8080 --ip 203.0.113.50 --extra-file "$WORK/extra.caddy"
+expected_new "$WORK/expected-extra" new.example.com 127.0.0.1:8080 "$(printf '\tencode gzip\n\theader X-Frame-Options DENY')"
+check "publish --extra-file adds its directives after reverse_proxy" "0 same" "$CODE $(same "$CADDYFILE" "$WORK/expected-extra")"
+
+pub_reset
+cfw setting-set example.com ssl flexible
+mark
+pubw publish new.example.com --to 8080
+check "publish refuses a proxied site on SSL mode flexible: exit 5" "5" "$CODE"
+check "…saying why and what to do" \
+  "cf: example.com is in SSL mode flexible: a proxied site needs full or strict (setting-set example.com ssl full), or publish with --no-proxy; nothing was changed" "$ERR"
+check "…before any write: no Cloudflare write, no copy, no caddy run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+pubw publish new.example.com --to 8080 --no-proxy
+check "…while --no-proxy publishes on flexible" "0 created	A	new.example.com	203.0.113.10	no" "$CODE $(nth 1 | cut -f1-5)"
+
+pub_reset
+cfw setting-set example.com ssl off
+mark
+pubw publish new.example.com --to 8080
+check "publish refuses a proxied site on SSL mode off: exit 5, before any write" "5 same 0 " \
+  "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+cfw setting-set example.com ssl strict
+mark
+pubw publish new.example.com --to 8080
+check "publish passes the guard on SSL mode strict" "0 created	A	new.example.com	203.0.113.10	yes" "$CODE $(nth 1 | cut -f1-5)"
+pub_reset
+fail_next GET /settings/ssl 403 9109 "Unauthorized to access requested resource"
+pubw publish new.example.com --to 8080
+check "publish whose SSL guard cannot be read is refused: exit 3, nothing written" \
+  "3 cf: Cloudflare 9109: Unauthorized to access requested resource same 0 " \
+  "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+
+pub_reset
+cfw universal-ssl example.com off
+mark
+pubw publish new.example.com --to 8080
+check "publish refuses a proxied site with Universal SSL off: exit 5" \
+  "5 cf: Universal SSL is off on example.com: the edge has no certificate for new.example.com (universal-ssl example.com on), or publish with --no-proxy; nothing was changed" \
+  "$CODE $ERR"
+check "…before any write" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+
+pub_reset
+pubw publish app.example.com --to 8080
+check "publish refuses a host that is a CNAME: exit 5, nothing written" \
+  "5 cf: app.example.com is a CNAME to www.example.com: dns-delete it, or dns-update it into an A, first; nothing was changed same " \
+  "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(writes)$(calls)"
+pubw publish a.example.com --to 8080
+check "publish refuses a host in a block of several before writing its record: exit 5" \
+  "5  0" "$CODE $(writes)$(calls) $(copies)"
+check_contains "…naming the block" "a.example.com is in the block of line 34 with other addresses" "$ERR"
+printf '{"alive": false, "sites": {}}\n' > "$CSTATE/world.json"
+pubw publish new.example.com --to 8080
+check "publish refuses when Caddy's admin API does not answer, before writing the record: exit 5" "5 " "$CODE $(writes)$(calls)"
+caddy_reset
+CCONF="$CADDY_CONFIG" pubw publish new.example.com --to 8080
+check "publish without --ip and without default_target exits 4, nothing written" \
+  "4 cf: no --ip, and no default_target in $CADDY_CONFIG " "$CODE $ERR $(writes)"
+CCONF="$CONFIG" pubw publish new.example.com --to 8080
+check "publish without a caddy section exits 4, nothing written" "4 " "$CODE $(writes)"
+pubw publish new.example.invalid --to 8080
+check "publish on a host no zone of the account holds exits 2" "2 cf: no zone of account alpha holds new.example.invalid" "$CODE $ERR"
+check "…the Caddyfile, its copies and caddy untouched" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+for to in '8080; respond x' 0 70000 'http://a b' '{$HOME}'; do
+  pubw publish new.example.com --to "$to"
+  check "publish refuses --to $to: exit 2, nothing written" "2 " "$CODE $(writes)"
+  check "…the Caddyfile, its copies and caddy untouched" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+done
+check_contains "…saying what --to takes" "cf: --to takes a port or an upstream (host:port, http://host:port): " "$ERR"
+pubw publish new.example.com --to 8080 --ip 203.0.113
+check "publish refuses an --ip that is not IPv4: exit 2" "2 cf: --ip takes an IPv4 address: 203.0.113" "$CODE $ERR"
+check "…the Caddyfile, its copies and caddy untouched, nothing sent" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+with_keys "$CADDY_CONFIG" "$WORK/publish-badtarget.json" '{"default_target": "203.0.113.300"}'
+CCONF="$WORK/publish-badtarget.json" pubw publish new.example.com --to 8080
+check "publish refuses a default_target that is not IPv4: exit 4, nothing written" \
+  "4 cf: $WORK/publish-badtarget.json: default_target is not an IPv4 address same 0 " "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+printf 'encode gzip\n' > "$WORK/locked-extra.caddy"
+chmod 000 "$WORK/locked-extra.caddy"
+pubw publish new.example.com --to 8080 --extra-file "$WORK/locked-extra.caddy"
+check "publish refuses an --extra-file it may not read: exit 2, nothing written" \
+  "2 cf: cannot read $WORK/locked-extra.caddy: Permission denied same 0 " "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+chmod 600 "$WORK/locked-extra.caddy"
+printf 'header {\n' > "$WORK/open-extra.caddy"
+pubw publish new.example.com --to 8080 --extra-file "$WORK/open-extra.caddy"
+check "publish refuses an --extra-file whose braces do not balance: exit 2, nothing written" "2 0" "$CODE $(writes)$(copies)"
+for form in 'header X-Key {$CF_API_TOKEN}' 'header X-Key {env.CF_API_TOKEN}' 'header X-Key {file./etc/passwd}' 'import tls_config' \
+    "$(printf 'handle /x {\n\timport other\n}')"; do
+  printf '%s\n' "$form" > "$WORK/refused-extra.caddy"
+  pubw publish new.example.com --to 8080 --extra-file "$WORK/refused-extra.caddy"
+  check "publish refuses an --extra-file holding $(printf '%s' "$form" | tr '\n\t' '  '): exit 2, nothing written" \
+    "2 same 0 " "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+done
+check_contains "…saying what it may not hold" \
+  "cf: $WORK/refused-extra.caddy imports at line 2: an --extra-file may not import, nor read the environment or files ({\$…}, {env.…}, {file.…}); nothing was changed" "$ERR"
+printf 'header X-Key {$CF_API_TOKEN}\n' > "$WORK/refused-extra.caddy"
+pubw publish new.example.com --to 8080 --extra-file "$WORK/refused-extra.caddy"
+check "…naming the placeholder" \
+  "cf: $WORK/refused-extra.caddy reads {\$ at line 1: an --extra-file may not import, nor read the environment or files ({\$…}, {env.…}, {file.…}); nothing was changed" "$ERR"
+pubw publish new.example.com --to 8080 --extra-file "$WORK/absent-extra.caddy"
+check "publish refuses an --extra-file that is not there: exit 2, nothing written" \
+  "2 cf: cannot read $WORK/absent-extra.caddy: No such file or directory same 0 " "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+printf 'encode gzip\n}\nheader X 1\n' > "$WORK/stray-extra.caddy"
+pubw publish new.example.com --to 8080 --extra-file "$WORK/stray-extra.caddy"
+check "publish refuses an --extra-file with a stray closing brace: exit 2, nothing written" \
+  "2 cf: the body cannot be used: a closing brace closes the site block at line 2 same 0 " "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+printf 'header X \xff\xfe\n' > "$WORK/binary-extra.caddy"
+pubw publish new.example.com --to 8080 --extra-file "$WORK/binary-extra.caddy"
+check "publish refuses an --extra-file that is not UTF-8: exit 2, nothing written" "2 same 0 " \
+  "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+check_contains "…saying it cannot read it" "cf: cannot read $WORK/binary-extra.caddy: " "$ERR"
+printf '\n  \n' > "$WORK/empty-extra.caddy"
+pubw publish new.example.com --to 8080 --extra-file "$WORK/empty-extra.caddy"
+check "publish refuses an empty --extra-file: exit 2, nothing written" \
+  "2 cf: $WORK/empty-extra.caddy is empty: leave --extra-file out same 0 " "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+pubw publish '*.example.com' --to 8080
+check "publish refuses a wildcard: exit 5" "5" "$CODE"
+check "…the Caddyfile, its copies and caddy untouched" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+check "no refusal sent a write" "" "$(writes)"
+
+pub_reset
+cfw dns-create example.com --name www --type A --content 203.0.113.11
+mark
+pubw publish www.example.com --to 8080
+check "publish refuses a host with several A records: exit 5, nothing written" \
+  "5 cf: www.example.com has 2 A records: dns-delete all but one first; nothing was changed same 0 " \
+  "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+
+pub_reset
+cfw dns-create example.com --name new --type AAAA --content 2001:db8::5
+mark
+pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check "publish refuses a host that has an AAAA record: exit 2, naming it, nothing written" \
+  "2 cf: new.example.com has an AAAA record (2001:db8::5): dns-delete it first, publish writes an A alone; nothing was changed same 0 " \
+  "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+
+pub_reset
+caddy_config "$WORK/caddy-nosnippet.json" ', "tls_snippet": null'
+with_keys "$WORK/caddy-nosnippet.json" "$WORK/publish-nosnippet.json" '{"default_target": "203.0.113.10"}'
+CCONF="$WORK/publish-nosnippet.json" pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check "publish without a tls_snippet configured still publishes" "0" "$CODE"
+check "…warning on stderr that the block imports none" \
+  "cf: warning: no caddy.tls_snippet in $WORK/publish-nosnippet.json: the block of new.example.com imports no TLS snippet" "$ERR"
+check "…the block without the import" "$(printf 'https://new.example.com {\n\tlog\n\treverse_proxy 127.0.0.1:8080\n}')" \
+  "$(sed -n '/^https:\/\/new.example.com {/,/^}/p' "$CADDYFILE")"
+
+pub_reset
+pubw publish fresh.example.com --to 8080 --ip 203.0.113.50
+check "publish whose check reads nxdomain still exits 0" "0" "$CODE"
+check "…and says so in its last line" "published, but the check reads nxdomain" "$(printf '%s\n' "$OUT" | tail -1)"
+pub_reset
+CHECK_PORT=$CLOSED_PORT pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check "publish whose check reads down says so, exit 0" "0 published, but the check reads down (connect)" "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+pub_reset
+CHECK_CA= pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check_contains "publish whose check reads untrusted says so" "published, but the check reads untrusted (" "$(printf '%s\n' "$OUT" | tail -1)"
+pub_reset
+pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check "publish whose check answers prints no such line" "0" "$(printf '%s\n' "$OUT" | grep -c 'published, but')"
+
+echo "== publish: a failure midway =="
+
+pub_reset
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check "a Caddy rollback after the record was created exits 6" "6" "$CODE"
+check "…the Caddyfile restored" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+check "…by validate and reload, then the copy validated and reloaded" "validate reload validate reload" "$(calls)"
+check "…the record created, then deleted again" \
+  "$(printf 'POST /zones/%s/dns_records\nDELETE /zones/%s/dns_records/<id>' "$ZID" "$ZID")" "$(writes)"
+check "…and every backup is named: the Caddyfile's, the undone record's, the record's" \
+  "cf: app.example.com went down after the reload; the Caddyfile is restored and reloaded; backup: $(ls "$CADDYFILE".bak-*); the DNS record of new.example.com is put back (its undone state: $(ls "$DNSBK"/*-dns.json | tail -1)); backup: $(ls "$DNSBK"/*-dns.json | head -1)" \
+  "$ERR"
+pub dns-get example.com new
+check "…no record is left" "2" "$CODE"
+
+for failing in 'fail the admin endpoint refused the reload' '{"down": ["app.example.com"]}'; do
+  pub_reset
+  printf '%s\n' "$failing" > "$CSTATE/reload"
+  pubw publish www.example.com --to 8080 --ip 203.0.113.60
+  check "a rollback after the record was updated ($failing) exits 6" "6" "$CODE"
+  pub dns-get example.com www
+  check "…the record back to 203.0.113.10, proxied" "A	www.example.com	203.0.113.10	yes	auto" "$(lines)"
+  check "…and the Caddyfile byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+done
+
+pub_reset
+printf 'fail adapting config: unrecognized directive\n' > "$CSTATE/validate"
+pubw publish www.example.com --to 8080 --ip 203.0.113.60
+check "a validate failure after the record was updated exits 6" "6" "$CODE"
+pub dns-get example.com www
+check "…the record is put back as it was" "A	www.example.com	203.0.113.10	yes	auto" "$(lines)"
+check "…by a second write of it" \
+  "$(printf 'PUT /zones/%s/dns_records/<id>\nPUT /zones/%s/dns_records/<id>' "$ZID" "$ZID")" "$(writes)"
+
+pub_reset
+printf 'header X-Key extra-secret-value-91\n' > "$WORK/secret-extra.caddy"
+printf 'fail adapting config: header X-Key extra-secret-value-91: unrecognized\n' > "$CSTATE/validate"
+pubw publish new.example.com --to 8080 --ip 203.0.113.50 --extra-file "$WORK/secret-extra.caddy"
+check "a validate failure with an --extra-file exits 6, the Caddyfile restored" "6 same" "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…naming the extra file, not Caddy's line" \
+  "cf: caddy validate failed on the block with the directives of $WORK/secret-extra.caddy (Caddy's line is not shown: it may quote them); the Caddyfile is restored; backup: " "$ERR"
+check "…which never reaches the output" "0" "$(printf '%s%s' "$OUT" "$ERR" | grep -c 'extra-secret-value-91')"
+
+pub_reset
+WWW=$(www_id)
+mark
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+fail_next PUT "/dns_records/$WWW" 500 1000 "boom" 1
+pubw publish www.example.com --to 8080 --ip 203.0.113.60
+check "a record that cannot be put back keeps the Caddy exit code" "6" "$CODE"
+check_contains "…and says the record could not be put back, with the failed write's own backup" \
+  "; the DNS record of www.example.com could not be put back (Cloudflare 1000: boom; backup: " "$ERR"
+check_contains "…and says to restore it by hand from its backup" \
+  "): restore it by hand; backup: $(ls "$DNSBK"/*-dns.json | head -1)" "$ERR"
+check "…the Caddyfile restored all the same" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+pub dns-get example.com www
+check "…the record left with the published address" "A	www.example.com	203.0.113.60	yes	auto" "$(lines)"
+
+# boom_publish <args...>: publish, its Caddy cycle failing with an error that is
+# no engine error; stdout, stderr and the exit code as run() keeps them.
+boom_publish() {
+  env -i PATH="$PATH" HOME="$HOMEDIR" CF_API_BASE="$API" $(check_env) \
+    python3 - "$ENGINE" "$@" >"$WORK/out" 2>"$WORK/err" <<'PYBOOM'
+import sys
+sys.path.insert(0, sys.argv[1])
+import cf
+from cflib import caddy
+def boom(*args, **kwargs):
+    raise RuntimeError("boom in the cycle")
+caddy.cycle = boom
+sys.exit(cf.main(sys.argv[2:], writes=True))
+PYBOOM
+  CODE=$?
+  OUT=$(cat "$WORK/out")
+  ERR=$(cat "$WORK/err")
+}
+pub_reset
+boom_publish publish new.example.com --to 8080 --ip 203.0.113.50
+check "an error that is no engine error after the record was created puts the record back" \
+  "$(printf 'POST /zones/%s/dns_records\nDELETE /zones/%s/dns_records/<id>' "$ZID" "$ZID")" "$(writes)"
+check_contains "…then is raised again" "RuntimeError: boom in the cycle" "$ERR"
+check_contains "…having said the record is put back" "cf: RuntimeError: boom in the cycle; the DNS record of new.example.com is put back" "$ERR"
+check "…not exit 0" "1" "$CODE"
+pub dns-get example.com new
+check "…no record is left" "2" "$CODE"
+pub_reset
+boom_publish publish www.example.com --to 8080 --ip 203.0.113.60
+pub dns-get example.com www
+check "…and an updated record is as it was" "A	www.example.com	203.0.113.10	yes	auto" "$(lines)"
+
+pub_reset
+fail_next POST /dns_records 500 1000 "boom"
+pubw publish new.example.com --to 8080 --ip 203.0.113.50
+check "a record write that fails stops publish before Caddy: exit 3, naming the backup" \
+  "3 cf: Cloudflare 1000: boom; backup: $(ls "$DNSBK"/*-dns.json | tail -1) same " "$CODE $ERR $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
+
+echo "== unpublish =="
+
+pub_reset
+pubw publish new.example.com --to 8080 --ip 203.0.113.50
+rm -f "$CADDYFILE".bak-* "$CSTATE/calls.jsonl"
+mark
+pubw unpublish new.example.com
+check "unpublish removes the block, then deletes the record" "0" "$CODE"
+check "…the cycle's line and copy, then the record and its backup" \
+  "$(printf 'new.example.com\t200→down\nbackup: %s\ndeleted\tA\tnew.example.com\t203.0.113.50\tyes\nbackup: %s' "$(ls "$CADDYFILE".bak-*)" "$(ls "$DNSBK"/*-dns.json | tail -1)")" \
+  "$(printf '%s\n' "$OUT" | cut -f1-5)"
+check "…the Caddyfile is the original again" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+check "…one write: the record's deletion" "DELETE /zones/$ZID/dns_records/<id>" "$(writes)"
+pub dns-get example.com new
+check "…no record is left" "2" "$CODE"
+
+pub_reset
+pubw unpublish www.example.com
+check "unpublish of a block written by hand removes it like caddy-site-remove" "0 same" "$CODE $(same "$CADDYFILE" "$FIXTURES/caddy/expected-remove-www")"
+
+pub_reset
+pubw unpublish example.com
+check "unpublish of a record with no block runs no caddy, deletes only the A" \
+  "0 deleted	A	example.com DELETE /zones/$ZID/dns_records/<id>" "$CODE $(nth 1 | cut -f1-3) $(writes)$(calls)"
+pub dns-get example.com @
+check "…the MX and the TXT of the name are kept" "MX TXT" "$(col 1 | tr '\n' ' ' | sed 's/ $//')"
+
+pub_reset
+pubw unpublish nothere.example.com
+check "unpublish with neither block nor record exits 2" \
+  "2 cf: nothing to unpublish: no site block and no A, AAAA or CNAME record for nothere.example.com" "$CODE $ERR"
+
+pub_reset
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+pubw unpublish www.example.com
+check "a Caddy rollback stops unpublish before the record: exit 6, the record kept" "6 " "$CODE $(writes)"
+
+pub_reset
+mkdir -p "$DNSBK"
+chmod 500 "$DNSBK"
+pubw unpublish www.example.com
+check "a records' backup that cannot be written stops unpublish before the block: exit 4" \
+  "4 same 0 " "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(writes)$(calls)"
+chmod 700 "$DNSBK"
+
+pub_reset
+WWW=$(www_id)
+mark
+fail_next DELETE "/dns_records/$WWW" 500 1000 "boom"
+pubw unpublish www.example.com
+check "a record deletion that fails after the block was removed exits 3" "3" "$CODE"
+check "…and puts the block back: the Caddyfile is the original" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+check "…through a second cycle" "validate reload validate reload" "$(calls)"
+check "…naming the record's backup and both copies" \
+  "cf: Cloudflare 1000: boom; backup: $(ls "$DNSBK"/*-dns.json | tail -1); the site block of www.example.com is put back (the Caddyfile without it: $(ls "$CADDYFILE".bak-* | tail -1)); backup: $(ls "$CADDYFILE".bak-* | head -1)" \
+  "$ERR"
+pub_reset
+WWW=$(www_id)
+printf 'pass\nfail the block cannot be validated again\n' > "$CSTATE/validate"
+fail_next DELETE "/dns_records/$WWW" 500 1000 "boom"
+pubw unpublish www.example.com
+check "a block that cannot be put back after a failed deletion exits 3" "3" "$CODE"
+check_contains "…saying so with the cycle's reason" \
+  "; the site block of www.example.com could not be put back (caddy validate failed: Error: the block cannot be validated again; the Caddyfile is restored; backup: " "$ERR"
+check "…the Caddyfile left without the block" "same" "$(same "$CADDYFILE" "$FIXTURES/caddy/expected-remove-www")"
+pub dns-get example.com www
+check "…the record kept" "A	www.example.com	203.0.113.10	yes	auto" "$(lines)"
+
+pub_reset
+APEX=$(CCONF="$PUB_CONFIG" pub dns-get example.com @ --json; printf '%s' "$OUT" | python3 -c 'import json,sys; print(next(r["id"] for r in json.load(sys.stdin) if r["type"] == "A"))')
+fail_next DELETE "/dns_records/$APEX" 500 1000 "boom"
+pubw unpublish example.com
+check "unpublish of a record with no block whose deletion fails exits 3, naming the backup, no caddy run" \
+  "3 cf: Cloudflare 1000: boom; backup: $(ls "$DNSBK"/*-dns.json | tail -1) " "$CODE $ERR $(calls)"
+pub dns-get example.com @
+check "…the record kept" "A MX TXT" "$(col 1 | tr '\n' ' ' | sed 's/ $//')"
+
+pub_reset
+cfw dns-create example.com --name www --type AAAA --content 2001:db8::1 --proxied
+AAAA_ID=$(printf '%s\n' "$OUT" | head -1 | cut -f7)
+rm -rf "$DNSBK"
+fail_next DELETE "/dns_records/$AAAA_ID" 500 1000 "boom"
+pubw unpublish www.example.com
+check "a deletion that fails after another one exits 3" "3" "$CODE"
+check_contains "…saying the record is put back" "cf: Cloudflare 1000: boom; the DNS record of www.example.com is put back (its undone state: " "$ERR"
+check_contains "…and the block" "; the site block of www.example.com is put back (the Caddyfile without it: " "$ERR"
+check "…the block is back" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+pub dns-get example.com www
+check "…the deleted record is back beside the one kept" "A AAAA" "$(col 1 | tr '\n' ' ' | sed 's/ $//')"
+unset CCONF
+
+echo "== inventory =="
+
+INV_CADDYFILE="$FIXTURES/caddy/Caddyfile-inventory"
+INV_HEAD="$(printf 'host\trecord\tproxied\tblock\thttps\tissuer\texpires')"
+caddy_reset
+cp "$INV_CADDYFILE" "$CADDYFILE"
+printf '{"alive": true, "sites": {"app.example.com": 200, "www.example.com": 200, "orphan.example.com": 200}}\n' > "$CSTATE/world.json"
+reset
+mark
+pub inventory example.com
+check "inventory: the zone's SSL settings, the DNS ↔ Caddyfile matrix with each host's check, the backup" \
+  "$(printf 'ssl full\tuniversal_ssl on\tmin_tls_version 1.2\ttls_1_3 on\talways_use_https off\n%s\napp.example.com\tCNAME www.example.com\tyes\tyes\t200\t%s\t%s\nexample.com\tA 203.0.113.10\tyes\tno\tdown (tls)\t-\t-\norphan.example.com\t-\t-\tyes\t200\t%s\t%s\nwww.example.com\tA 203.0.113.10\tyes\tyes\t200\t%s\t%s\nrecords without block: example.com\nblocks without record: orphan.example.com\nbackup: %s' \
+    "$INV_HEAD" "$ISSUER" "$EXPIRES" "$ISSUER" "$EXPIRES" "$ISSUER" "$EXPIRES" "$(ls "$DNSBK"/*-dns.json | tail -1)")" \
+  "$OUT"
+check "…sends no write and runs no caddy" "" "$(writes)$(calls)"
+check "…the backup holds every record of the zone" "7" \
+  "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]["records"]))' "$(ls "$DNSBK"/*-dns.json | tail -1)")"
+cfw restore "$(ls "$DNSBK"/*-dns.json | tail -1)"
+check "…and it replays: nothing to restore on an unchanged zone" "0 nothing to restore" "$CODE $(printf '%s' "$OUT" | cut -c1-18)"
+pub inventory example.com --json
+check "inventory --json gives the matrix and the checks" "orphan.example.com example.com 4 200" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; i=json.load(sys.stdin); print(" ".join(i["blocks_without_record"]), " ".join(i["records_without_block"]), len(i["hosts"]), i["hosts"][0]["https"])')"
+CCONF="$CONFIG" pub inventory example.com
+check "inventory on a machine without Caddy compares nothing, and says so" \
+  "$(printf 'example.com\tA 203.0.113.10\tyes\t-\ncaddy: no caddy section in %s: the blocks are not compared' "$CONFIG")" \
+  "$(printf '%s\n' "$OUT" | grep -E '^example.com|^caddy:' | cut -f1-4)"
+caddy_reset
+pub inventory example.com
+check "inventory on the full fixture: the hosts of a block of several have no record" \
+  "$(printf 'records without block: example.com\nblocks without record: a.example.com, b.example.com')" "$(printf '%s\n' "$OUT" | grep 'without')"
+pubw inventory example.com
+check "inventory is a read: cf-write.py refuses it" "2" "$CODE"
+
+caddy_reset
+cp "$INV_CADDYFILE" "$CADDYFILE"
+printf '{"alive": true, "sites": {"app.example.com": 200, "www.example.com": 200, "orphan.example.com": 200}}\n' > "$CSTATE/world.json"
+reset
+cfw dns-create example.com --name slower --type A --content 203.0.113.9
+started=$(python3 -c 'import time; print(time.monotonic())')
+CADDY_EXTRA="CF_CHECK_DEADLINE=2" pub inventory example.com
+took=$(python3 -c 'import sys, time; print(int(time.monotonic() - float(sys.argv[1])))' "$started")
+check "inventory: a host whose resolver answers past the deadline is not checked (time)" \
+  "slower.example.com	A 203.0.113.9	no	no	not checked (time)" "$(printf '%s\n' "$OUT" | grep '^slower' | cut -f1-5)"
+check "…the others checked within it" "200 200" "$(printf '%s\n' "$OUT" | grep -E '^(app|www)\.' | cut -f5 | tr '\n' ' ' | sed 's/ $//')"
+check "…the whole inventory ending by the deadline, not by the slow answer (8 s)" "yes" "$([ "$took" -lt 5 ] && echo yes || echo "no: $took s")"
+check "…and exits 0" "0" "$CODE"
+
+reset
+cfw dns-create example.com --name 'é' --type A --content 203.0.113.9
+cfw dns-create example.com --name "$(printf 'l%.0s' $(seq 1 64))" --type A --content 203.0.113.9
+cfw dns-create example.com --name '*' --type A --content 203.0.113.9
+rm -f "$NAMES.log"
+pub inventory example.com --json
+check "inventory checks a name that is not ASCII, or has a label over 63 characters, as a bad name" "0 bad name bad name" \
+  "$CODE $(printf '%s' "$OUT" | python3 -c 'import json,sys; h={r["host"]: r for r in json.load(sys.stdin)["hosts"]}; print(h["é.example.com"]["address"], h["l" * 64 + ".example.com"]["address"])')"
+check "…asking the resolver for neither, nor for the wildcard" "" "$(resolved | tr ' ' '\n' | grep -E 'é|l{64}|\*')"
+check "…with no traceback" "0" "$(grep -c Traceback "$WORK/err")"
+
+echo "== end to end: the whole spec through the tool's requests =="
+
+# DNS, protections, cache, Caddy, then publish, check, inventory and
+# unpublish of one service, each as the request the mod sends.
+CCONF="$PUB_CONFIG"
+pub_reset
+pubj '{"command": "rules", "args": {"zone": "example.com", "plugin": true}}'
+RULES_BEFORE=$OUT
+pubj '{"command": "cache-rules", "args": {"zone": "example.com"}}'
+CACHE_BEFORE=$OUT
+pubwj '{"command": "dns-create", "args": {"zone": "example.com", "name": "svc", "type": "A", "content": "203.0.113.70", "proxied": false}}'
+check "e2e: DNS: a record for the service, DNS only" "created	A	svc.example.com	203.0.113.70	no" "$(nth 1 | cut -f1-5)"
+pubwj '{"command": "allow-only-countries", "args": {"target": "svc.example.com", "countries": ["FR"]}}'
+check "e2e: protections: France only on the host, in one call" "created" "$(nth 1 | cut -f1)"
+pubj '{"command": "rules", "args": {"zone": "example.com", "plugin": true}}'
+SVC_RULE=$(printf '%s\n' "$OUT" | grep 'svc.example.com')
+pubwj '{"command": "cache-rule-add", "args": {"zone": "example.com", "host": "svc.example.com"}}'
+check "e2e: cache: the host cached" "created" "$(nth 1 | cut -f1)"
+pubj '{"command": "cache-rules", "args": {"zone": "example.com"}}'
+SVC_CACHE=$(printf '%s\n' "$OUT" | grep 'svc.example.com')
+pubj '{"command": "caddy-status"}'
+check "e2e: Caddy: alive, validating, its service loading the envfile" "alive ok ok" \
+  "$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "admin" || $1 == "validate" || $1 == "service" {print $2}' | tr '\n' ' ' | sed 's/ $//')"
+pubwj '{"command": "publish", "args": {"host": "svc.example.com", "to": "8081"}}'
+check "e2e: publish takes the record over: proxied, on the default target" \
+  "$(printf 'before\tA\tsvc.example.com\t203.0.113.70\tno\nafter\tA\tsvc.example.com\t203.0.113.10\tyes')" "$(nth 1,2 | cut -f1-5)"
+check "e2e: …the block written and served" "svc.example.com	down→200" "$(printf '%s\n' "$OUT" | grep '→')"
+check "e2e: …and the host checked" "svc.example.com	127.0.0.1	200	$ISSUER	$EXPIRES" "$(printf '%s\n' "$OUT" | tail -1)"
+check "e2e: …with C5's block" "$(printf 'https://svc.example.com {\n\timport tls_config\n\tlog\n\treverse_proxy 127.0.0.1:8081\n}')" \
+  "$(sed -n '/^https:\/\/svc.example.com {/,/^}/p' "$CADDYFILE")"
+pubj '{"command": "check", "args": {"host": "svc.example.com"}}'
+check "e2e: check" "svc.example.com	127.0.0.1	200	$ISSUER	$EXPIRES" "$(nth 2)"
+pubj '{"command": "inventory", "args": {"zone": "example.com"}}'
+check "e2e: inventory: the host with its record, its block and its check" "svc.example.com	A 203.0.113.10	yes	yes	200" \
+  "$(printf '%s\n' "$OUT" | grep '^svc' | cut -f1-5)"
+check "e2e: …the matrix" "$(printf 'records without block: example.com\nblocks without record: a.example.com, b.example.com')" \
+  "$(printf '%s\n' "$OUT" | grep 'without')"
+pubwj '{"command": "unpublish", "args": {"host": "svc.example.com"}}'
+check "e2e: unpublish: the block removed, then the record" \
+  "$(printf 'svc.example.com\t200→down\ndeleted\tA\tsvc.example.com\t203.0.113.10\tyes')" "$(printf '%s\n' "$OUT" | grep -v '^backup: ' | cut -f1-5)"
+check "e2e: …the Caddyfile is the original again" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+pubj '{"command": "check", "args": {"host": "svc.example.com"}}'
+check "e2e: check: the host no longer answers" "svc.example.com	127.0.0.1	down (tls)	-	-" "$(nth 2)"
+pubj '{"command": "inventory", "args": {"zone": "example.com"}}'
+check "e2e: inventory: the host is gone" "0" "$(printf '%s\n' "$OUT" | grep -c '^svc')"
+pubwj '{"command": "dns-create", "args": {"zone": "example.com", "name": "v6only", "type": "AAAA", "content": "2001:db8::7"}}'
+pubwj '{"command": "publish", "args": {"host": "v6only.example.com", "to": "8082"}}'
+check "e2e: publish refuses a host with an AAAA, naming it" \
+  "2 cf: v6only.example.com has an AAAA record (2001:db8::7): dns-delete it first, publish writes an A alone; nothing was changed" "$CODE $ERR"
+pubwj '{"command": "publish", "args": {"host": "late.example.com", "to": "8083"}}'
+check "e2e: publish of a host the public cannot resolve yet says so, exit 0" "0 published, but the check reads nxdomain" \
+  "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+pubwj '{"command": "unpublish", "args": {"host": "late.example.com"}}'
+check "e2e: …and its unpublish leaves the Caddyfile as it was" "0 same" "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+pubwj '{"command": "worker-domain-add", "args": {"hostname": "edge.example.com", "script": "hello"}}'
+check "e2e: Workers: a custom domain attached" "attached	edge.example.com	hello" "$OUT"
+pubj '{"command": "worker-domains", "args": {"zone": "example.com"}}'
+check "e2e: …listed among the zone's" "edge.example.com legacy.example.com" "$(col 2 | sort | tr '\n' ' ' | sed 's/ $//')"
+pubwj '{"command": "worker-domain-delete", "args": {"hostname": "edge.example.com"}}'
+check "e2e: …detached, after its backup" "deleted	edge.example.com	hello	example.com" "$(nth 1)"
+pubwj "{\"command\": \"restore\", \"args\": {\"path\": \"$(backup_of)\"}}"
+check "e2e: …and attached again by restore" "restored	edge.example.com	hello	example.com" "$(nth 1)"
+pubj '{"command": "rules", "args": {"zone": "example.com", "plugin": true}}'
+check "e2e: the protection is kept: unpublish touches only the record and the block" "1" "$(printf '%s\n' "$OUT" | grep -c 'svc.example.com')"
+check "e2e: …the very rule, by value" "$SVC_RULE" "$(printf '%s\n' "$OUT" | grep 'svc.example.com')"
+pubj '{"command": "cache-rules", "args": {"zone": "example.com"}}'
+check "e2e: …and the very cache rule" "$SVC_CACHE" "$(printf '%s\n' "$OUT" | grep 'svc.example.com')"
+pubwj "{\"command\": \"rule-delete\", \"args\": {\"zone\": \"example.com\", \"rule\": \"$(printf '%s' "$SVC_RULE" | cut -f2)\"}}"
+check "e2e: the rule deleted after the unpublish" "0 deleted" "$CODE $(nth 1 | cut -f1)"
+pubwj "{\"command\": \"cache-rule-delete\", \"args\": {\"zone\": \"example.com\", \"rule\": \"$(printf '%s' "$SVC_CACHE" | cut -f1)\"}}"
+check "e2e: the cache rule deleted after the unpublish" "0 deleted" "$CODE $(nth 1 | cut -f1)"
+pubj '{"command": "rules", "args": {"zone": "example.com", "plugin": true}}'
+check "e2e: …the rules are gone: the plugin's rules as before the cycle" "$RULES_BEFORE" "$OUT"
+pubj '{"command": "cache-rules", "args": {"zone": "example.com"}}'
+check "e2e: …the cache rules as before the cycle, the dashboard's kept" "$CACHE_BEFORE" "$OUT"
+unset CCONF
+
 echo "== install.sh and the doctor =="
 
 # inst [args...]: install.sh in the same scrubbed environment as the engine.
@@ -2353,6 +3075,143 @@ check_contains "the failing account is named" "cloudflare: account beta: cf: Clo
 EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/broken.json" inst --check
 check "a malformed config exits 14" "14" "$CODE"
 
+echo "== the doctor: permissions and the local Caddy =="
+
+reset
+inst --check
+check_contains "the doctor reads every family of commands with alpha's token" "cloudflare: account alpha: reads: every family readable" "$OUT"
+check_contains "…and names the write its policies lack, with the commands that need it" \
+  "cloudflare: account alpha: missing write: Workers Scripts (worker-deploy, worker-delete, worker-domain-add, worker-domain-delete)" "$OUT"
+check "…and no other" "1" "$(printf '%s\n' "$OUT" | grep -c 'account alpha: missing')"
+check_contains "beta's token is refused the Workers reads: named" \
+  "cloudflare: account beta: missing read: Workers Routes (worker-routes)" "$OUT"
+check_contains "…both of them" "cloudflare: account beta: missing read: Workers Scripts (workers, worker-domains)" "$OUT"
+check_contains "…and its writes, which its policies cannot show, are said to be unchecked" \
+  "cloudflare: account beta: writes: not checked: the token cannot read its own policies (grant it API Tokens Read for this check)" "$OUT"
+check "missing permissions are reported, not a failure" "0" "$CODE"
+check "the doctor's probes only read" "" "$(sent | grep -v '^GET')"
+check_contains "without a caddy section the Caddy checks are skipped" \
+  "cloudflare: caddy: no caddy section in $CONFIG: the Caddy checks are skipped" "$OUT"
+
+caddy_reset
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$CADDY_CONFIG FAKE_CADDY_STATE=$CSTATE" inst --check
+check "the doctor passes with the local Caddy set up" "0" "$CODE"
+check_contains "…the binary found" "cloudflare: caddy: binary $FAKE_CADDY: v2.8.4 h1:fake" "$OUT"
+check_contains "…the service found, starting caddy with the envfile" "cloudflare: caddy: service launchd $PLIST: --envfile $ENVFILE" "$OUT"
+check_contains "…the envfile holding the variable the tls snippet reads, its value never shown" \
+  "cloudflare: caddy: envfile $ENVFILE holds CF_API_TOKEN, the variable of the tls_config snippet" "$OUT"
+check "…running caddy version only" "version" "$(calls)"
+
+printf 'LOG=info\n' > "$CADDY/novar.env"
+chmod 600 "$CADDY/novar.env"
+caddy_config "$WORK/caddy-novar.json" ", \"envfile\": \"$CADDY/novar.env\""
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-novar.json FAKE_CADDY_STATE=$CSTATE" inst --check
+check "an envfile without the token variable exits 15" "15" "$CODE"
+check_contains "…naming the variable" \
+  "cloudflare: caddy: error: envfile $CADDY/novar.env has no CF_API_TOKEN, the variable of the tls_config snippet" "$ERR"
+check_contains "…and the fix" "cloudflare: not ready. Fix the Caddy setup named above" "$ERR"
+caddy_config "$WORK/caddy-noenvfile.json" ", \"envfile\": \"$CADDY/absent.env\""
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-noenvfile.json FAKE_CADDY_STATE=$CSTATE" inst --check
+check "an envfile that is not there exits 15" "15" "$CODE"
+check_contains "…naming it" "cloudflare: caddy: error: cannot read the envfile $CADDY/absent.env" "$ERR"
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-noenv.json FAKE_CADDY_STATE=$CSTATE" inst --check
+check "a service that does not load the envfile exits 15" "15" "$CODE"
+check_contains "…saying so" "cloudflare: caddy: error: $CADDY/noenv.plist does not start caddy with --envfile $ENVFILE" "$ERR"
+caddy_config "$WORK/caddy-noservice.json" ", \"service\": \"$CADDY/absent.plist\""
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-noservice.json FAKE_CADDY_STATE=$CSTATE" inst --check
+check "a service file that is not there exits 15" "15" "$CODE"
+check_contains "…naming it" "cloudflare: caddy: error: cannot read $CADDY/absent.plist" "$ERR"
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-nobinary.json FAKE_CADDY_STATE=$CSTATE" inst --check
+check "a caddy binary that is not there exits 15" "15" "$CODE"
+check_contains "…naming it" "cloudflare: caddy: error: binary $CADDY/bin/absent: cannot run $CADDY/bin/absent" "$ERR"
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-novar.json FAKE_CADDY_STATE=$CSTATE BETA_CLOUDFLARE_API_TOKEN=cf-wrong" inst --check
+check "a failing token outranks a Caddy problem: exit 13" "13" "$CODE"
+check "no doctor output holds the envfile's token" "0" "$(grep -c "$CADDY_TOKEN" "$CAPTURED")"
+
+# doc <args...>: engine/doctor.py, as install.sh runs it.
+doc() { run doctor.py "$@"; }
+reset
+EXTRA_ENV="IOTA_CLOUDFLARE_API_TOKEN=$TOKEN_IOTA" doc permissions iota tok-iota
+check "a token holding every write under its dashboard name (… Edit): every family writable" \
+  "0 $(printf 'reads: every family readable\nwrites: every family writable')" "$CODE $OUT"
+EXTRA_ENV="DELTA_CLOUDFLARE_API_TOKEN=$TOKEN_DELTA" doc permissions delta tok-delta
+check "DNS Firewall Write grants no DNS write, Cache Settings Write no purge: no false « every family writable »" \
+  "$(printf 'reads: every family readable\nmissing write: DNS (dns-create, dns-update, dns-delete, publish, unpublish)\nmissing write: Cache Purge (purge, purge-all)')" "$OUT"
+EXTRA_ENV="EPSILON_CLOUDFLARE_API_TOKEN=$TOKEN_EPSILON" doc permissions epsilon tok-epsilon
+check "Cache Purge alone: the cache rules' writes are missing, not the purges" \
+  "$(printf 'reads: every family readable\nmissing write: Cache Rules (cache-rule-add, cache-rule-delete)')" "$OUT"
+EXTRA_ENV="BETA_CLOUDFLARE_API_TOKEN=cf-wrong" doc permissions beta
+check "an invalid token is said invalid, not missing every read: exit 1" \
+  "1 invalid token: Cloudflare 10000: Authentication error: nothing it may read or write can be told" "$CODE $OUT"
+EXTRA_ENV="ZETA_CLOUDFLARE_API_TOKEN=$TOKEN_ZETA" doc permissions zeta tok-zeta
+check "a token with no zone to probe on says which families are not probed" \
+  "$(printf 'not probed: %s (no zone to probe on)\n' DNS 'Zone Settings' 'SSL and Certificates' 'Zone WAF' 'Firewall Services' 'Bot Management' 'Cache Rules' 'Workers Routes')
+writes: not checked: the token cannot read its own policies (grant it API Tokens Read for this check)" "$OUT"
+reset
+EXTRA_ENV="ETA_CLOUDFLARE_API_TOKEN=$TOKEN_ETA ETA_CLOUDFLARE_ACCOUNT_ID=acc-alpha" doc permissions eta tok-eta
+check "a token refused its policies as a user reads them on its account" "writes: every family writable" "$(printf '%s\n' "$OUT" | tail -1)"
+check "…asking the user path, then the account's" "$(printf 'GET /user/tokens/tok-eta\nGET /accounts/acc-alpha/tokens/tok-eta')" \
+  "$(sent | grep 'tokens/tok-eta')"
+doc
+check "doctor.py without arguments gives its usage: exit 2" \
+  "2 cf: usage: doctor.py permissions <account> [token id] | doctor.py caddy" "$CODE $ERR"
+doc permissions
+check "…and with too few" "2" "$CODE"
+check "the doctor's permission checks only read" "" "$(sent | grep -v '^GET')"
+
+# The DNS-01 token of the envfile: verified, its DNS edit right read when it
+# may read its own policies; each envfile alone, the service not checked.
+CADDY_TOKEN_DNS=cf-caddy-fixture-token-dns-2c8f71e4
+CADDY_TOKEN_ZONE=cf-caddy-fixture-token-zone-6b3d09fa
+CADDY_TOKEN_OLD=cf-caddy-fixture-token-old-4e9a17c2
+CADDY_TOKEN_BAD=cf-caddy-fixture-token-bad-7d21e5b8
+# dns01_doc <token>: doctor.py caddy on an envfile holding that token.
+dns01_doc() {
+  printf 'CF_API_TOKEN=%s\n' "$1" > "$CADDY/dns01.env"
+  chmod 600 "$CADDY/dns01.env"
+  caddy_config "$WORK/caddy-dns01.json" ", \"envfile\": \"$CADDY/dns01.env\", \"manager\": null"
+  EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-dns01.json FAKE_CADDY_STATE=$CSTATE" doc caddy
+}
+reset
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$CADDY_CONFIG FAKE_CADDY_STATE=$CSTATE" doc caddy
+check "the DNS-01 token is verified; one that may not read its policies has its DNS edit right said not checkable" \
+  "0 caddy: DNS-01 token CF_API_TOKEN: valid; DNS edit right not checkable with this token (it may not read its own policies)" \
+  "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+check "…by a GET of /user/tokens/verify, then of the token" "$(printf 'GET /user/tokens/verify\nGET /user/tokens/tok-caddy')" "$(sent)"
+dns01_doc "$CADDY_TOKEN_DNS"
+check "a DNS-01 token that reads its policies and holds DNS Write passes" "0 caddy: DNS-01 token CF_API_TOKEN: valid, with DNS Write" \
+  "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+dns01_doc "$CADDY_TOKEN_ZONE"
+check "a DNS-01 token without DNS Write fails" \
+  "1 caddy: error: DNS-01 token CF_API_TOKEN is valid but has no DNS Write: Caddy cannot answer a DNS-01 challenge" \
+  "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+dns01_doc "$CADDY_TOKEN_OLD"
+check "an expired DNS-01 token fails" "1 caddy: error: DNS-01 token CF_API_TOKEN is expired" "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+dns01_doc "$CADDY_TOKEN_BAD"
+check "an invalid DNS-01 token fails" "1 caddy: error: DNS-01 token CF_API_TOKEN is invalid: Cloudflare 10000: Authentication error" \
+  "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+chmod 644 "$CADDY/dns01.env"
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-dns01.json FAKE_CADDY_STATE=$CSTATE" doc caddy
+check_contains "an envfile wider than 0600 is flagged" "caddy: warning: $CADDY/dns01.env is readable by others (mode 644): chmod 600 it" "$OUT"
+printf 'CF_API_TOKEN=%s\nLOG=info\n' "$CADDY_TOKEN_DNS" > "$CADDY/dns01.env"
+chmod 600 "$CADDY/dns01.env"
+caddy_config "$WORK/caddy-nosnippet-doc.json" ", \"envfile\": \"$CADDY/dns01.env\", \"manager\": null, \"tls_snippet\": null"
+reset
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-nosnippet-doc.json FAKE_CADDY_STATE=$CSTATE" doc caddy
+check "without a tls_snippet the token variable is not checked, and says so" \
+  "0 caddy: envfile $CADDY/dns01.env: 2 variables; no tls_snippet configured, token variable not checked" \
+  "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+check "…nor sent" "" "$(sent)"
+check "a config without a manager says the service is not checked" "caddy: service: no manager in the config, not checked" \
+  "$(printf '%s\n' "$OUT" | grep '^caddy: service')"
+caddy_config "$WORK/caddy-noenvfile-doc.json" ", \"envfile\": null, \"manager\": null"
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/caddy-noenvfile-doc.json FAKE_CADDY_STATE=$CSTATE" doc caddy
+check "a config without an envfile fails, saying what validate and reload would lack" \
+  "1 caddy: error: no envfile in the config: caddy validate and reload would run without the DNS-01 token" \
+  "$CODE $(printf '%s\n' "$OUT" | tail -1)"
+check "no doctor output holds a DNS-01 token" "0" \
+  "$(grep -cE "$CADDY_TOKEN|$CADDY_TOKEN_DNS|$CADDY_TOKEN_ZONE|$CADDY_TOKEN_OLD|$CADDY_TOKEN_BAD" "$CAPTURED")"
+
 echo "== tokens never leave =="
 
 reset
@@ -2379,9 +3238,11 @@ check "…by a failing deploy" "3 cf: Cloudflare 9999: bad header Bearer [token]
 reset
 check "the request log holds the multipart bodies as sent" "yes" "$(grep -q '"__raw": "--' "$REQUESTS" && echo yes)"
 check "no request the engine sent holds a fixture token" "0" \
-  "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$REQUESTS")"
+  "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$TOKEN_IOTA|$TOKEN_DELTA|$TOKEN_EPSILON|$TOKEN_ZETA|$TOKEN_ETA|$CADDY_TOKEN|$CADDY_TOKEN_DNS|$CADDY_TOKEN_ZONE|$CADDY_TOKEN_OLD|$CADDY_TOKEN_BAD" "$REQUESTS")"
+check "no output of the engine holds a fixture token" "0" \
+  "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$TOKEN_IOTA|$TOKEN_DELTA|$TOKEN_EPSILON|$TOKEN_ZETA|$TOKEN_ETA|$CADDY_TOKEN|$CADDY_TOKEN_DNS|$CADDY_TOKEN_ZONE|$CADDY_TOKEN_OLD|$CADDY_TOKEN_BAD" "$CAPTURED")"
 check "no backup holds a fixture token" "" \
-  "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$CADDY_TOKEN" "$WORK/backups" 2>/dev/null)"
+  "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$TOKEN_IOTA|$TOKEN_DELTA|$TOKEN_EPSILON|$TOKEN_ZETA|$TOKEN_ETA|$CADDY_TOKEN|$CADDY_TOKEN_DNS|$CADDY_TOKEN_ZONE|$CADDY_TOKEN_OLD|$CADDY_TOKEN_BAD" "$WORK/backups" 2>/dev/null)"
 check "no Caddyfile or copy of it holds the envfile's token" "" \
   "$(grep -lF "$CADDY_TOKEN" "$CADDYFILE" "$CADDYFILE".bak-* 2>/dev/null)"
 check "the engine prints no traceback" "0" "$(grep -c 'Traceback' "$CAPTURED")"
@@ -2400,7 +3261,7 @@ src = open(sys.argv[2], encoding="utf-8").read()
 def listed(head, close):
     if head not in src:
         return None
-    return set(re.findall(r"'([a-z-]+)'", src.split(head, 1)[1].split(close, 1)[0]))
+    return set(re.findall(r"'([A-Za-z0-9_-]+)'", src.split(head, 1)[1].split(close, 1)[0]))
 commands = listed("export const COMMANDS = [", "]")
 reads = listed("export const READS = new Set([", "])")
 if commands is None or reads is None:
@@ -2428,7 +3289,7 @@ echo "== no output holds a token =="
 
 # Every output the engine printed, and the mod's test log.
 check "no output of the engine or of the mod holds a fixture token" "0" \
-  "$(cat "$CAPTURED" "$WORK/mod.log" 2>/dev/null | grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$CADDY_TOKEN")"
+  "$(cat "$CAPTURED" "$WORK/mod.log" 2>/dev/null | grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$TOKEN_IOTA|$TOKEN_DELTA|$TOKEN_EPSILON|$TOKEN_ZETA|$TOKEN_ETA|$CADDY_TOKEN|$CADDY_TOKEN_DNS|$CADDY_TOKEN_ZONE|$CADDY_TOKEN_OLD|$CADDY_TOKEN_BAD")"
 
 echo
 echo "$pass passed, $fail failed, $skip skipped"

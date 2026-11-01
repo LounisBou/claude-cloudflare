@@ -7,11 +7,14 @@
 #
 # Tokens are read by the engine alone: this script never reads one into a
 # variable, prints it, logs it or writes it anywhere. It lists the accounts
-# and runs auth-check for each, whose output names the account, never the token.
+# and runs auth-check for each, whose output names the account, never the token;
+# then engine/doctor.py says what each token may read and write, and checks the
+# local Caddy's binary, service and envfile when the config has a caddy section.
 set -u
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 CF="$ROOT/engine/cf.py"
+DOCTOR="$ROOT/engine/doctor.py"
 MODE=install
 [ "${1:-}" = "--check" ] && MODE=check
 
@@ -55,24 +58,41 @@ code=0
 for name in $names; do
   if check=$(python3 "$CF" --account="$name" auth-check 2>&1); then
     status=$(printf '%s\n' "$check" | sed -n 2p | cut -f2)
+    token_id=$(printf '%s\n' "$check" | sed -n 2p | cut -f3)
     say "account $name: $status"
+    # What the token may do: reported, never a failure, as a token may be
+    # scoped to fewer commands on purpose.
+    perms=$(python3 "$DOCTOR" permissions "$name" "$token_id" 2>&1)
+    printf '%s\n' "$perms" | while IFS= read -r line; do say "account $name: $line"; done
   else
     printf 'cloudflare: account %s: %s\n' "$name" "$check" >&2
     code=13
   fi
 done
 
+if caddy=$(python3 "$DOCTOR" caddy 2>&1); then
+  printf '%s\n' "$caddy" | while IFS= read -r line; do say "$line"; done
+else
+  printf '%s\n' "$caddy" | while IFS= read -r line; do say "$line"; done >&2
+  [ "$code" -eq 0 ] && code=15
+fi
+
 if [ "$code" -eq 0 ]; then
   echo "cloudflare: all checks passed."
   echo
   echo "Tool available:"
   echo "  cf            Cloudflare API calls from the standard library: accounts,"
-  echo "                zones, DNS records, backups and restore"
+  echo "                zones, DNS records, protections, cache, Workers, backups and"
+  echo "                restore; the local Caddy; publish, unpublish, check, inventory"
   echo
   echo "Skill available (where mods do not load):"
   echo "  cf-curl       the same engine from Bash"
   exit 0
 fi
 
-echo "cloudflare: not ready. Replace the token named above, then run /cloudflare:doctor." >&2
+if [ "$code" -eq 15 ]; then
+  echo "cloudflare: not ready. Fix the Caddy setup named above, then run /cloudflare:doctor." >&2
+else
+  echo "cloudflare: not ready. Replace the token named above, then run /cloudflare:doctor." >&2
+fi
 exit "$code"
