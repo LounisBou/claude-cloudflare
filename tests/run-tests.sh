@@ -816,8 +816,10 @@ check "rule-add keeps every dashboard rule of the phase whole" "kept" "$(foreign
 new_id=$(printf '%s\n' "$OUT" | head -1 | cut -f3)
 cfw rule-add example.com --expression 'true' --action nuke
 check "rule-add refuses an unknown action" "2" "$CODE"
+mark
 cfw rule-add example.com --expression 'true' --action log
 check "the log action is refused on a Free zone" "5 cf: plan Free Website: the log action is not offered" "$CODE $ERR"
+check "a refused log action sent no change" "" "$(since_mark | grep -v '^GET')"
 mark
 cfw rule-update example.com "$new_id" --no-enabled --description renamed
 check "rule-update shows before and after" "before after" "$(printf '%s\n' "$OUT" | head -2 | cut -f1 | tr '\n' ' ' | sed 's/ $//')"
@@ -863,8 +865,10 @@ check "rate-limit sends the limit" "10 20 10" "$(curl -fsS "http://127.0.0.1:$PO
 import json, sys
 r = [x for x in json.load(sys.stdin) if x["method"] == "PUT"][-1]["body"]["rules"][0]["ratelimit"]
 print(r["period"], r["requests_per_period"], r["mitigation_timeout"])')"
+mark
 cfw rate-limit api.example.com --requests 5
 check "a second rate limit on Free exits 5 naming the plan and the full quota" "5 cf: plan Free Website: rate limiting rules quota is full (1 of 1)" "$CODE $ERR"
+check "a second rate limit on Free sent no change" "" "$(since_mark | grep -v '^GET')"
 mark
 cfw rate-limit tm.example.com --requests 20 --timeout 600
 check "a Free zone mitigates for 10 seconds only" "5 cf: plan Free Website: the mitigation timeout takes 10 seconds only" "$CODE $ERR"
@@ -907,8 +911,10 @@ cfw managed-rules example.com on
 check "managed-rules on Free deploys the Free Managed Ruleset" 'execute true' "$(last_put "/rulesets/phases/http_request_firewall_managed/entrypoint")"
 cfw managed-rules example.com on
 check "managed-rules already on changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
+mark
 cfw managed-rules example.com on --ruleset owasp
 check "OWASP is refused on a Free zone" "5 cf: plan Free Website: no Cloudflare OWASP Core Ruleset" "$CODE $ERR"
+check "a refused OWASP ruleset sent no change" "" "$(since_mark | grep -v '^GET')"
 mark
 cfw managed-rules example.org on
 check "a Pro zone deploys the Cloudflare Managed Ruleset" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
