@@ -2277,6 +2277,34 @@ check "e2e: the file is identical to before" "same" "$(same "$CADDYFILE" "$WORK/
 cdywj '{"command": "caddy-site-remove", "args": {"host": "new.example.com"}}'
 check "e2e: caddy-site-remove" "0" "$CODE"
 check "e2e: the Caddyfile is the original again" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+e2e_set="{\"command\": \"caddy-site-set\", \"args\": {\"host\": \"new.example.com\", \"body-file\": \"$BODY\"}}"
+caddy_reset
+hold_lock
+CADDY_EXTRA="CF_CADDY_BUDGET=3" cdywj "$e2e_set"
+kill "$HOLDER"
+wait "$HOLDER" 2>/dev/null
+check "e2e: a change while another holds the lock exits 5, the Caddyfile untouched" "5 same 0 " "$CODE $(untouched)"
+caddy_reset
+printf '{"sleep": 30}\n' > "$CSTATE/reload"
+started=$(date +%s)
+CADDY_EXTRA="CF_CADDY_BUDGET=4" cdywj "$e2e_set"
+took=$(( $(date +%s) - started ))
+check "e2e: a reload past the cycle's budget is rolled back within it, exit 6, the file identical" "6 same yes" \
+  "$CODE $(same "$CADDYFILE" "$ORIGINAL") $([ "$took" -le 5 ] && echo yes || echo "no: $took s")"
+caddy_reset
+printf 'hang\n' > "$CSTATE/validate"
+printf '%s' "$e2e_set" > "$WORK/stdin"
+env -i PATH="$PATH" HOME="$HOMEDIR" CF_API_BASE="$API" $(caddy_env) \
+  python3 "$ENGINE/cf-write.py" --stdin-json <"$WORK/stdin" >"$WORK/out" 2>"$WORK/err" &
+engine_pid=$!
+for _ in $(seq 1 50); do
+  [ -s "$CSTATE/hung.pids" ] && break
+  sleep 0.1
+done
+kill -TERM "$engine_pid"
+wait "$engine_pid"
+check "e2e: SIGTERM in the middle of a change puts the file back, exit 143" "143 same" "$? $(same "$CADDYFILE" "$ORIGINAL")"
+cat "$WORK/out" "$WORK/err" >> "$CAPTURED"
 CCONF="$WORK/caddy-noenv.json" cdyj '{"command": "caddy-status"}'
 check_contains "e2e: caddy-status warns of the service without its envfile" "warning: $CADDY/noenv.plist does not start caddy with --envfile" "$OUT"
 
