@@ -88,13 +88,24 @@ def body(record):
     return out
 
 
-def save(ctx, zone, names):
-    """Back up every record of these names, before a write changes them."""
+def save(ctx, zone, names, types):
+    """Back up every record of these names, before a write changes them.
+    types: the record types the write touches on each name ({name: [type]}),
+    which restore takes back along with the types of the records saved."""
     records = []
     for name in sorted(set(names)):
         records.extend(by_name(ctx, zone, name))
-    data = {"zone_id": zone["id"], "names": sorted(set(names)), "records": records}
+    data = {"zone_id": zone["id"], "names": sorted(set(names)), "records": records,
+            "types": {name: sorted(set(found)) for name, found in sorted(types.items())}}
     return ctx.backup.save(ctx.account, zone["name"], "dns", data)
+
+
+def _held(data):
+    """{name: types} a backup holds: its records' and the types its write touched."""
+    held = {name: set((data.get("types") or {}).get(name) or ()) for name in data["names"]}
+    for record in data["records"]:
+        held.setdefault(record["name"], set()).add(record["type"])
+    return held
 
 
 @contextlib.contextmanager
@@ -152,7 +163,7 @@ def dns_create(args, ctx):
     zone = zones.find(ctx, args.zone)
     record = dict(_changes(args), name=fqdn(zone["name"], args.name))
     record.setdefault("ttl", 1)
-    path = save(ctx, zone, [record["name"]])
+    path = save(ctx, zone, [record["name"]], {record["name"]: [record["type"]]})
     with backed_by(path):
         created = ctx.api.post(_records_path(zone), body(record))
     return "%s\nbackup: %s" % (line("created", created), path)
@@ -167,7 +178,8 @@ def dns_update(args, ctx):
         raise errors.UsageError("nothing to change: pass type, name, content, ttl, proxied, priority or comment")
     current = one(ctx, zone, args.record, args.from_type)
     record = dict(current, **changes)
-    path = save(ctx, zone, [current["name"], record["name"]])
+    moved = [current["type"], record["type"]]
+    path = save(ctx, zone, [current["name"], record["name"]], {current["name"]: moved, record["name"]: moved})
     with backed_by(path):
         updated = ctx.api.put(_records_path(zone) + "/" + current["id"], body(record))
     return "%s\n%s\nbackup: %s" % (line("before", current), line("after", updated), path)
@@ -176,7 +188,7 @@ def dns_update(args, ctx):
 def dns_delete(args, ctx):
     zone = zones.find(ctx, args.zone)
     current = one(ctx, zone, args.record, args.type)
-    path = save(ctx, zone, [current["name"]])
+    path = save(ctx, zone, [current["name"]], {current["name"]: [current["type"]]})
     with backed_by(path):
         ctx.api.delete(_records_path(zone) + "/" + current["id"])
     return "%s\nbackup: %s" % (line("deleted", current), path)
@@ -184,24 +196,35 @@ def dns_delete(args, ctx):
 
 @backup.restorer("dns")
 def restore(ctx, saved):
-    """Bring the names of a backup back to the records it holds: records
-    added since are deleted, changed ones overwritten, deleted ones created
-    again (under a new id). Returns the lines to print, a backup of the
-    state it replaces last; no line when nothing differs."""
+    """Bring the names of a backup back to the records it holds, on the
+    record types it holds: records of those types added since are deleted,
+    changed ones overwritten, deleted ones created again (under a new id).
+    Records of any other type are kept, and counted. Returns the lines to
+    print, a backup of the state it replaces last; no line when nothing
+    differs."""
     data = saved["data"]
     zone = {"id": data["zone_id"], "name": saved["zone"]}
     names = data["names"]
+    held = _held(data)
     wanted = {r["id"]: r for r in data["records"]}
     current = []
+    kept = 0
     for name in names:
-        current.extend(by_name(ctx, zone, name))
+        for record in by_name(ctx, zone, name):
+            if record["id"] in wanted or record["type"] in held.get(record["name"], ()):
+                current.append(record)
+            else:
+                kept += 1
     deletes = [r for r in current if r["id"] not in wanted]
     now = {r["id"]: r for r in current}
     puts = [r for i, r in wanted.items() if i in now and body(now[i]) != body(r)]
     posts = [r for i, r in wanted.items() if i not in now]
+    tail = ["kept: %d record%s of a type the backup does not hold" % (kept, "" if kept == 1 else "s")] if kept else []
     if not (deletes or puts or posts):
-        return []
-    path = save(ctx, zone, names)
+        if not tail:
+            return []
+        return ["nothing to restore: %s already matches the backup" % ", ".join(names)] + tail
+    path = save(ctx, zone, names, {name: sorted(held.get(name, ())) for name in names})
     lines = []
     # Deletions first: a CNAME cannot share its name with the records it replaces.
     with backed_by(path):
@@ -212,7 +235,7 @@ def restore(ctx, saved):
             lines.append(line("restored", ctx.api.put(_records_path(zone) + "/" + record["id"], body(record))))
         for record in posts:
             lines.append(line("recreated", ctx.api.post(_records_path(zone), body(record))))
-    return lines + ["backup: " + path]
+    return lines + tail + ["backup: " + path]
 
 
 def _proxied(parser):

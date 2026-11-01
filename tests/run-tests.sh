@@ -493,6 +493,17 @@ check "e2e: the update's backup brings the CNAME back" \
   "$(printf '%s\n' "$OUT" | head -2 | cut -f1-5)"
 cfj '{"command": "dns-get", "args": {"zone": "example.com", "record": "e2e"}}'
 check "e2e: the name holds the CNAME alone" "CNAME	e2e.example.com	www.example.com	yes	auto" "$(lines)"
+# A restore brings back the types its backup holds, and leaves the others.
+cfwj '{"command": "dns-update", "args": {"zone": "example.com", "record": "www", "content": "203.0.113.11"}}'
+e2e_a_bk=$(backup_of)
+cfwj '{"command": "dns-create", "args": {"zone": "example.com", "type": "TXT", "name": "www", "content": "added since"}}'
+cfwj "{\"command\": \"restore\", \"args\": {\"path\": \"$e2e_a_bk\"}}"
+check "e2e: restore brings the A back and says what it kept" \
+  "$(printf 'restored\tA\twww.example.com\t203.0.113.10\tyes\nkept: 1 record of a type the backup does not hold')" \
+  "$(printf '%s\n' "$OUT" | head -2 | cut -f1-5)"
+cfj '{"command": "dns-get", "args": {"zone": "example.com", "record": "www"}}'
+check "e2e: the TXT added since survives the restore" \
+  "$(printf 'A\twww.example.com\t203.0.113.10\tyes\tauto\nTXT\twww.example.com\tadded since\tno\tauto')" "$(lines)"
 
 echo "== install.sh and the doctor =="
 
