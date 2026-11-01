@@ -2104,7 +2104,7 @@ inject 'def boom(*args):
 caddyctl.Settings.validate = boom' caddy-site-set new.example.com --body-file "$BODY"
 check "an exception raised after the write puts the Caddyfile back byte for byte before it goes on" "1 same" \
   "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
-check_contains "…the exception still goes on" "ValueError: injected" "$ERR"
+check_contains "…the exception still goes on, named without a traceback" "cf: internal error: ValueError" "$ERR"
 caddy_reset
 inject 'def interrupt(*args):
     raise KeyboardInterrupt
