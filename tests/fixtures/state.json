@@ -10,8 +10,11 @@
       "id": "0123456789abcdef0123456789abcdef",
       "name": "example.com",
       "status": "active",
-      "plan": {"name": "Free Website"},
+      "plan": {"name": "Free Website", "legacy_id": "free"},
       "account": {"id": "acc-alpha"},
+      "rulesets": {"http_request_firewall_custom": [{"action": "block", "expression": "(http.request.uri.path contains \"/wp-login.php\")", "description": "dashboard: no wp-login", "enabled": true}]},
+      "ip_rules": [{"mode": "block", "configuration": {"target": "ip", "value": "198.51.100.7"}, "notes": "dashboard"}],
+      "cert_packs": [{"id": "pack-1", "type": "universal", "hosts": ["example.com", "*.example.com"], "status": "active", "certificate_authority": "lets_encrypt", "validity_days": 90, "certificates": [{"id": "c1", "expires_on": "2027-01-30T00:00:00Z", "status": "active"}]}, {"id": "pack-2", "type": "advanced", "hosts": ["app.example.com"], "status": "pending_validation", "certificate_authority": "google", "validity_days": 90, "certificates": []}],
       "records": [
         {"type": "A", "name": "example.com", "content": "203.0.113.10", "proxied": true},
         {"type": "A", "name": "www.example.com", "content": "203.0.113.10", "proxied": true},
@@ -44,6 +47,7 @@
       "status": "active",
       "plan": {"name": "Free Website"},
       "account": {"id": "acc-beta"},
+      "rulesets": {"http_request_firewall_custom": [{"action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 1"}, {"action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 2"}, {"action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 3"}, {"action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 4"}]},
       "records": [
         {"type": "A", "name": "example.edu", "content": "203.0.113.20"}
       ]

@@ -124,11 +124,11 @@ echo "== manifests =="
 
 check "plugin name" "cloudflare" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' "$ROOT/.claude-plugin/plugin.json")"
-check "plugin version" "0.1.0" \
+check "plugin version" "0.2.0" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$ROOT/.claude-plugin/plugin.json")"
 check "plugin license" "MIT" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["license"])' "$ROOT/.claude-plugin/plugin.json")"
-check "marketplace lists the plugin at the same version" "cloudflare 0.1.0" \
+check "marketplace lists the plugin at the same version" "cloudflare 0.2.0" \
   "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["plugins"][0]; print(p["name"], p["version"])' "$ROOT/.claude-plugin/marketplace.json")"
 check "hooks.json names the module" "./register.ts" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["modules"][0])' "$ROOT/hooks/hooks.json")"
@@ -571,6 +571,296 @@ check "e2e: restore brings the A back and says what it kept" \
 cfj '{"command": "dns-get", "args": {"zone": "example.com", "record": "www"}}'
 check "e2e: the TXT added since survives the restore" \
   "$(printf 'A\twww.example.com\t203.0.113.10\tyes\tauto\nTXT\twww.example.com\tadded since\tno\tauto')" "$(lines)"
+
+echo "== zone settings, certificates, plan =="
+
+ZC=0123456789abcdef0123456789abcdef
+# last_put <path suffix>: the rules of the last PUT sent to a path, one "action expression" per line.
+last_put() {
+  curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+puts = [r for r in json.load(sys.stdin) if r["method"] == "PUT" and r["path"].endswith(sys.argv[1])]
+for rule in puts[-1]["body"]["rules"]:
+    print(rule["action"], rule["expression"])' "$1"
+}
+# col <n>: the nth column of OUT's lines, the header dropped.
+col() { printf '%s\n' "$OUT" | sed 1d | cut -f"$1"; }
+
+reset
+cf settings example.com
+check "settings header" "id	value	editable" "$(printf '%s\n' "$OUT" | head -1)"
+check "settings lists every setting of the zone" "8" "$(col 1 | wc -l | tr -d ' ')"
+check "settings shows a value" "ssl	full	yes" "$(printf '%s\n' "$OUT" | grep '^ssl	')"
+cf settings example.com SSL
+check "settings of one setting, without regard to case" "ssl	full	yes" "$(col 1-3)"
+cf settings example.com nope
+check "an unknown setting exits 3" "3 cf: Cloudflare 1142: Unknown setting nope" "$CODE $ERR"
+
+cf certs example.com
+check "certs header" "id	type	status	hosts	expires	authority" "$(printf '%s\n' "$OUT" | head -1)"
+check "certs shows a pack with its latest expiry" "pack-1	universal	active	example.com,*.example.com	2027-01-30T00:00:00Z	lets_encrypt" "$(col 1-6 | sed -n 1p)"
+check "certs shows a pack still pending" "pack-2	advanced	pending_validation	app.example.com	-	google" "$(col 1-6 | sed -n 2p)"
+
+cf plan example.com
+check "plan prints the plan and the quotas with their use" \
+  "$(printf 'item\tvalue\tlimit\nplan\tFree Website\t-\ncustom_rules\t1\t5\nrate_limit_rules\t0\t1\nmanaged_rulesets\tfree\t-\nbot_product\tbot-fight-mode\t-')" "$OUT"
+cf plan example.org
+check "plan reads the plan from its name when it has no legacy id" \
+  "$(printf 'plan\tPro Website\t-\ncustom_rules\t0\t20\nrate_limit_rules\t0\t2\nmanaged_rulesets\tfree,cloudflare,owasp\t-\nbot_product\tsuper-bot-fight-mode\t-')" "$(printf '%s\n' "$OUT" | sed 1d)"
+cf plan example.net --json
+check "plan --json gives the quotas and the use" "Free Website 5 0" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["plan"], p["quotas"]["custom_rules"], p["used"]["custom_rules"])')"
+
+cf rules example.com
+check "rules lists the dashboard rule" "custom	block	yes	dashboard: no wp-login" "$(col 1,3-5 | sed -n 1p)"
+cf rules example.net
+check "a zone with no entrypoint has no rules" "" "$OUT"
+cf rules example.com --plugin
+check "rules --plugin shows none of the dashboard's rules" "" "$OUT"
+cf rules example.com --phase nope
+check "an unknown phase exits 2" "2" "$CODE"
+
+cf ip-rules example.com
+check "ip-rules lists the access rules" "block	ip	198.51.100.7	dashboard" "$(col 1-4)"
+
+cf security example.com
+check "security gives the protections in place" \
+  "$(printf 'item\tvalue\nsecurity_level\tmedium\nbrowser_check\ton\nchallenge_ttl\t1800\nbot_fight_mode\toff\ncustom_rules\t1\nrate_limit_rules\t0\nmanaged_rules\t0\nip_access_rules\t1')" "$OUT"
+
+cfw settings example.com
+check "cf-write.py refuses the new reads" "2 cf: settings only reads: use cf.py" "$CODE $ERR"
+
+echo "== zone setting writes =="
+
+reset
+cfw setting-set example.com ssl strict
+check "setting-set shows the change" "changed	ssl	full	strict" "$(printf '%s\n' "$OUT" | head -1)"
+set_bk=$(backup_of)
+check "setting-set ends with its backup" "1" "$(printf '%s\n' "$OUT" | grep -c '^backup: ')"
+cf settings example.com ssl
+check "the setting changed" "strict" "$(col 2)"
+check "the backup holds the value before" "full" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["settings"]["ssl"])' "$set_bk")"
+reset
+cfw setting-set example.com ssl full
+check "a setting already at the value is left alone" "unchanged	ssl	full" "$OUT"
+check "an unchanged setting sends no write" "" "$(sent | grep -v '^GET')"
+cfw setting-set example.com ssl wrong
+check "a value the setting does not take exits 2" "2 cf: ssl takes off, flexible, full, strict" "$CODE $ERR"
+cfw setting-set example.com security_level under_attack
+check "setting-set leaves the security level to its own commands" "2" "$CODE"
+cfw setting-set example.com challenge_ttl 900
+check "a number is sent as a number" "changed	challenge_ttl	1800	900" "$(printf '%s\n' "$OUT" | head -1)"
+cfwj '{"command": "setting-set", "args": {"zone": "example.com", "setting": "min_tls_version", "value": "1.3"}}'
+check "stdin json sets a setting" "changed	min_tls_version	1.2	1.3" "$(printf '%s\n' "$OUT" | head -1)"
+cfw setting-set example.com ssl strict
+cfw restore "$(backup_of)"
+check "restore puts a setting back" "restored	ssl	full" "$(printf '%s\n' "$OUT" | head -1)"
+cf settings example.com ssl
+check "the setting is back" "full" "$(col 2)"
+
+reset
+cfw universal-ssl example.com off
+check "universal-ssl off" "changed	universal_ssl	on	off" "$(printf '%s\n' "$OUT" | head -1)"
+usl_bk=$(backup_of)
+cfw universal-ssl example.com off
+check "universal-ssl already off is left alone" "unchanged	universal_ssl	off" "$OUT"
+cfw restore "$usl_bk"
+check "restore turns Universal SSL back on" "restored	universal_ssl	on" "$(printf '%s\n' "$OUT" | head -1)"
+cfw universal-ssl example.com maybe
+check "universal-ssl takes on or off" "2" "$CODE"
+
+reset
+cfw security-level example.com high
+check "security-level sets the level" "changed	security_level	medium	high" "$(printf '%s\n' "$OUT" | head -1)"
+cfw security-level example.com under_attack
+check "security-level refuses the emergency mode" "2" "$CODE"
+cfw under-attack example.com on
+check "under-attack on" "changed	security_level	high	under_attack" "$(printf '%s\n' "$OUT" | head -1)"
+cfw under-attack example.com off
+check "under-attack off goes back to medium" "changed	security_level	under_attack	medium" "$(printf '%s\n' "$OUT" | head -1)"
+cfw under-attack example.com on
+cfw under-attack example.com off --level high
+check "under-attack off --level names the level" "changed	security_level	under_attack	high" "$(printf '%s\n' "$OUT" | head -1)"
+
+reset
+cfw bot-fight example.com on
+check "bot-fight on" "changed	bot_fight_mode	off	on" "$(printf '%s\n' "$OUT" | head -1)"
+bot_bk=$(backup_of)
+cfw bot-fight example.com on
+check "bot-fight already on is left alone" "unchanged	bot_fight_mode	on" "$OUT"
+cfw restore "$bot_bk"
+check "restore turns Bot Fight Mode back off" "restored	bot_fight_mode	off" "$(printf '%s\n' "$OUT" | head -1)"
+reset
+cfw bot-fight example.org on
+check "bot-fight on a Pro zone is refused" "5 cf: plan Pro Website: Bot Fight Mode is the Free product; this plan's super-bot-fight-mode is set in the dashboard" "$CODE $ERR"
+check "a refused write sends no change" "" "$(sent | grep -v '^GET')"
+
+echo "== rules: composition, merge and foreign rules =="
+
+reset
+cfw block-countries tm.example.com ru CN
+check "block-countries creates a plugin rule" "created	custom	block	yes	cf-plugin: block-countries tm.example.com RU,CN" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4-6)"
+bc_bk=$(backup_of)
+check "the host and the countries are composed into an expression" \
+  '(http.host eq "tm.example.com" and ip.src.country in {"RU" "CN"})' \
+  "$(cf rules example.com --plugin; printf '%s\n' "$OUT" | sed 1d | cut -f6)"
+check "the write sent the dashboard rule back with the new one" "2" "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | wc -l | tr -d ' ')"
+check "the dashboard rule is intact" 'block (http.request.uri.path contains "/wp-login.php")' "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | sed -n 1p)"
+cf rules example.com
+check "rules shows the dashboard rule and the plugin's" "2" "$(col 1 | wc -l | tr -d ' ')"
+check "the backup holds the whole entrypoint as it was" "1 dashboard: no wp-login" \
+  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; print(len(d["rules"]), d["rules"][0]["description"])' "$bc_bk")"
+check "the backup is of kind ruleset" "ruleset" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' "$bc_bk")"
+reset
+cfw block-countries tm.example.com RU CN
+cfw block-countries tm.example.com RU,CN
+check "the same rule twice changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
+cfw block-countries example.com fr
+check "a zone's name makes the rule zone-wide" '(ip.src.country in {"FR"})' "$(cf rules example.com --plugin; printf '%s\n' "$OUT" | sed 1d | cut -f6 | tail -1)"
+cfw block-countries nope.test FR
+check "a host of no zone exits 2" "2 cf: no zone of account alpha holds nope.test" "$CODE $ERR"
+cfw block-countries 'a" or true or "b.example.com' FR
+check "a host cannot carry an expression" "2" "$CODE"
+cfw block-countries tm.example.com FRA
+check "a country code has two letters" "2 cf: FRA is not a two-letter country code" "$CODE $ERR"
+
+reset
+cfw allow-only-countries tm.example.com fr
+check "allow-only-countries blocks every other country" 'block (http.host eq "tm.example.com" and not ip.src.country in {"FR"})' "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | tail -1)"
+cfw challenge tm.example.com --path /admin --country RU --country CN
+check "challenge composes host, path and countries" 'managed_challenge (http.host eq "tm.example.com" and starts_with(http.request.uri.path, "/admin") and ip.src.country in {"RU" "CN"})' "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | tail -1)"
+cfwj '{"command": "challenge", "args": {"target": "api.example.com", "type": "js", "country": ["RU"]}}'
+check "stdin json takes a list of countries and a challenge type" 'js_challenge (http.host eq "api.example.com" and ip.src.country in {"RU"})' "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | tail -1)"
+cf rules example.com --plugin
+check "rules --plugin shows the plugin's rules" "3" "$(col 1 | wc -l | tr -d ' ')"
+
+reset
+cfw rule-add example.com --expression '(ip.src.asn eq 64500)' --action block --description 'from the agent'
+check "rule-add takes a raw expression" "created	custom	block	yes	from the agent" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4-6)"
+new_id=$(printf '%s\n' "$OUT" | head -1 | cut -f3)
+cfw rule-add example.com --expression 'true' --action nuke
+check "rule-add refuses an unknown action" "2" "$CODE"
+cfw rule-add example.com --expression 'true' --action log
+check "the log action is refused on a Free zone" "5 cf: plan Free Website: the log action is not offered" "$CODE $ERR"
+cfw rule-update example.com "$new_id" --no-enabled --description renamed
+check "rule-update shows before and after" "before after" "$(printf '%s\n' "$OUT" | head -2 | cut -f1 | tr '\n' ' ' | sed 's/ $//')"
+cf rules example.com
+check "rule-update turned the rule off" "no" "$(printf '%s\n' "$OUT" | grep renamed | cut -f4)"
+check "rule-update kept the dashboard rule" "1" "$(printf '%s\n' "$OUT" | grep -c 'dashboard: no wp-login')"
+cfw rule-update example.com "$new_id"
+check "rule-update with nothing to change exits 2" "2" "$CODE"
+cfw rule-update example.com 00000000000000000000000000000000 --action block
+check "an unknown rule exits 2" "2 cf: no rule 00000000000000000000000000000000 in example.com" "$CODE $ERR"
+cfw rule-delete example.com "$new_id"
+del_bk=$(backup_of)
+check "rule-delete prints the rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cf rules example.com
+check "rule-delete kept the dashboard rule" "dashboard: no wp-login" "$(col 5)"
+cfw restore "$del_bk"
+check "restore puts the ruleset back" "restored	custom	2 rules" "$(printf '%s\n' "$OUT" | head -1)"
+cf rules example.com
+check "the deleted rule is back" "2" "$(col 1 | wc -l | tr -d ' ')"
+cfw restore "$del_bk"
+check "a restore with nothing to change says so" "nothing to restore: http_request_firewall_custom already matches the backup" "$OUT"
+
+reset
+cfw block-countries www.example.net FR
+check "a zone with no entrypoint gets one, whole" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfw restore "$(backup_of)"
+check "restore of a backup taken with no entrypoint empties it" "restored	custom	0 rules" "$(printf '%s\n' "$OUT" | head -1)"
+
+echo "== plans and quotas =="
+
+reset
+cfw rate-limit tm.example.com --requests 20 --period 60
+check "a Free zone counts over 10 seconds only" "5 cf: plan Free Website: rate limiting counts over 10 seconds only" "$CODE $ERR"
+check "a refused rate limit sent no change" "" "$(sent | grep -v '^GET')"
+cfw rate-limit tm.example.com --requests 20
+check "rate-limit creates a rule in its own phase" "created	ratelimit	block	yes	cf-plugin: rate-limit tm.example.com 20/10s" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4-6)"
+check "rate-limit sends the limit" "10 20 10" "$(curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+r = [x for x in json.load(sys.stdin) if x["method"] == "PUT"][-1]["body"]["rules"][0]["ratelimit"]
+print(r["period"], r["requests_per_period"], r["mitigation_timeout"])')"
+cfw rate-limit api.example.com --requests 5
+check "a second rate limit on Free exits 5 naming the plan and the full quota" "5 cf: plan Free Website: rate limiting rules quota is full (1 of 1)" "$CODE $ERR"
+cfw rate-limit example.org --requests 5
+cfw rate-limit www.example.org --requests 5 --period 60 --timeout 3600 --path /api
+check "a Pro zone counts over a minute" "ratelimit" "$(printf '%s\n' "$OUT" | head -1 | cut -f2)"
+cfw rate-limit www.example.org --requests 5 --period 120
+check "a Pro zone refuses two minutes" "5" "$CODE"
+
+reset
+cfw managed-rules example.com on
+check "managed-rules on Free deploys the Free Managed Ruleset" 'execute true' "$(last_put "/rulesets/phases/http_request_firewall_managed/entrypoint")"
+cfw managed-rules example.com on
+check "managed-rules already on changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
+cfw managed-rules example.com on --ruleset owasp
+check "OWASP is refused on a Free zone" "5 cf: plan Free Website: no Cloudflare OWASP Core Ruleset" "$CODE $ERR"
+cfw managed-rules example.org on
+check "a Pro zone deploys the Cloudflare Managed Ruleset" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfw managed-rules example.com off
+check "managed-rules off deletes the plugin's rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfw managed-rules example.com off
+check "managed-rules off with none changes nothing" "unchanged	free	off" "$OUT"
+
+reset
+cfw ip-block example.com 203.0.113.0/24 --note scanner
+check "ip-block creates an access rule" "created	block	ip_range	203.0.113.0/24	scanner" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+ip_bk=$(backup_of)
+cfw ip-block example.com 203.0.113.0/24
+check "the same access rule twice changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
+cfw ip-allow example.com 203.0.113.0/24
+check "ip-allow over a block changes its mode" "before	block	ip_range	203.0.113.0/24	scanner" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+check "…to allow" "after	allow	ip_range	203.0.113.0/24	scanner" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1-5)"
+cfw ip-block example.com AS64500
+check "an AS number is a target" "created	block	asn	AS64500" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
+cfw ip-block example.com ru
+check "a country code is a target" "created	block	country	RU" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
+cfw ip-block example.com not-an-ip
+check "a target that is none exits 2" "2" "$CODE"
+cfw ip-rule-delete example.com 198.51.100.7
+check "ip-rule-delete takes a target" "deleted	block	ip	198.51.100.7	dashboard" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+del_ip_bk=$(backup_of)
+cfw ip-rule-delete example.com 198.51.100.7
+check "ip-rule-delete of nothing exits 2" "2" "$CODE"
+cfw restore "$del_ip_bk"
+check "restore recreates the access rule" "recreated	block	ip	198.51.100.7	dashboard" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+cf ip-rules example.com
+check "the access rule is back, with the plugin's" "5" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
+cfw restore "$ip_bk"
+check "restore of the first backup removes what was added since" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+
+echo "== end to end: a protection cycle on a Free zone at its quota =="
+
+# example.edu is Free and holds four dashboard rules of its five slots.
+reset
+cfj '{"command": "plan", "account": "beta", "args": {"zone": "example.edu"}}'
+check "e2e: the plan shows four of five rules used" "custom_rules	4	5" "$(printf '%s\n' "$OUT" | grep custom_rules)"
+cfwj '{"command": "block-countries", "account": "beta", "args": {"target": "tm.example.edu", "countries": ["RU", "CN"]}}'
+check "e2e: block-countries takes the last slot" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfwj '{"command": "allow-only-countries", "account": "beta", "args": {"target": "api.example.edu", "countries": ["FR"]}}'
+check "e2e: allow-only-countries merges under the quota" "before	custom	block" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4)"
+check "e2e: …into one rule" "merged" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1)"
+e2e_merge_bk=$(backup_of)
+cfj '{"command": "rules", "account": "beta", "args": {"zone": "example.edu"}}'
+check "e2e: rules shows five rules, four of them the dashboard's" "5 4" "$(printf '%s\n' "$OUT" | sed 1d | wc -l | tr -d ' ') $(printf '%s\n' "$OUT" | grep -c 'dashboard:')"
+check "e2e: the merged rule carries both hosts" "2" \
+  "$(printf '%s\n' "$OUT" | grep 'cf-plugin' | cut -f6 | grep -o 'tm.example.edu\|api.example.edu' | wc -l | tr -d ' ')"
+merged_id=$(printf '%s\n' "$OUT" | grep 'cf-plugin' | cut -f2)
+cfwj "{\"command\": \"rule-delete\", \"account\": \"beta\", \"args\": {\"zone\": \"example.edu\", \"rule\": \"$merged_id\"}}"
+check "e2e: rule-delete removes the merged rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfj '{"command": "rules", "account": "beta", "args": {"zone": "example.edu", "plugin": true}}'
+check "e2e: only the dashboard's four are left" "" "$OUT"
+cfwj "{\"command\": \"restore\", \"account\": \"beta\", \"args\": {\"path\": \"$(ls -d "$WORK"/backups/beta/example.edu/* | tail -1)\"}}"
+check "e2e: restore from the delete's backup brings the merged rule back" "restored	custom	5 rules" "$(printf '%s\n' "$OUT" | head -1)"
+cfj '{"command": "rules", "account": "beta", "args": {"zone": "example.edu", "plugin": true}}'
+check "e2e: the merged rule is back" "1" "$(printf '%s\n' "$OUT" | sed 1d | wc -l | tr -d ' ')"
+reset_log_mark=$(sent | wc -l)
+cfwj '{"command": "challenge", "account": "beta", "args": {"target": "www.example.edu"}}'
+check "e2e: a write past the quota exits 5, naming the plan and the full quota" \
+  "5 cf: plan Free Website: custom rules quota is full (5 of 5)" "$CODE $ERR"
+check "e2e: the refused write sent no change" "0" "$(sent | tail -n +$((reset_log_mark + 1)) | grep -vc '^GET')"
 
 echo "== install.sh and the doctor =="
 
