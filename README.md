@@ -44,12 +44,14 @@ A token the API echoes back is masked.
 
 - reads: `auth-check`, `accounts`, `zones`, `dns-list`, `dns-get`,
   `dns-export`, `backups`, `settings`, `certs`, `plan`, `rules`, `ip-rules`,
-  `security`;
+  `security`, `cache-rules`, `workers`, `worker-routes`;
 - writes: `dns-create`, `dns-update` (type change included), `dns-delete`,
   `restore`, `setting-set`, `universal-ssl`, `rule-add`, `rule-update`,
   `rule-delete`, `block-countries`, `allow-only-countries`, `rate-limit`,
   `challenge`, `managed-rules`, `ip-allow`, `ip-block`, `ip-rule-delete`,
-  `bot-fight`, `security-level`, `under-attack`.
+  `bot-fight`, `security-level`, `under-attack`, `cache-rule-add`,
+  `cache-rule-delete`, `purge`, `purge-all`, `worker-deploy`, `worker-delete`,
+  `worker-route-add`, `worker-route-delete`, `worker-domain-add`.
 
 Output is compact text, one line per object; `"json": true` on a read gives
 the full objects. `engine/REFERENCE.md` lists every command, its arguments and
@@ -86,10 +88,25 @@ write the plan cannot take (a feature it lacks, a full quota) exits 5 with the
 reason and sends nothing. On a Free zone, block rules for several hosts merge
 into one when the five custom rules are used up.
 
+## Cache and Workers
+
+`cache-rule-add example.com --host tm.example.com` caches everything on a host;
+`--path-prefix`, `--mode bypass` and `--mode ttl --ttl 3600` cover the usual
+cases, `--expression` takes a raw one. Cache rules go through the same read,
+change, write-back as the protections, so the dashboard's are kept, and the
+plan's quota is checked first. `purge` takes URLs, hosts, prefixes or tags;
+`purge-all` empties the zone's cache.
+
+`worker-deploy hello --file hello.js` uploads an ES module (the script's
+content is saved first when it replaces one), `worker-delete` saves the
+content before deleting, `worker-route-add` / `worker-route-delete` manage a
+zone's routes and `worker-domain-add` attaches a hostname to a script.
+`restore` puts back cache rules, a deleted script and deleted routes.
+
 ## Backups and restore
 
 Before every zone write the engine saves what the write touches (the records
-of the names, the whole ruleset entrypoint, the settings or access rules) to `backup_dir/<account>/<zone>/<UTC timestamp>-<kind>.json`, and the
+of the names, the whole ruleset entrypoint, the settings or access rules, a Worker script's content, a zone's routes) to `backup_dir/<account>/<zone>/<UTC timestamp>-<kind>.json`, and the
 write's output ends with `backup: <path>`. A backup that cannot be written
 stops the write. `backups` lists them; `restore <path>` brings those names
 back to the saved records, after saving the current ones.
