@@ -131,7 +131,8 @@ written through the admin API, and Caddy is never stopped or restarted.
 `caddy-site-set app.example.com --body-file app.caddy` replaces the block of
 that host, or appends one, and keeps every other byte of the file: global
 options, snippets, comments and the other sites. `caddy-site-remove` takes a
-block out, `caddy-reload` reloads a file edited by hand. Each runs the same
+block out, `caddy-reload` reloads a file edited by hand and writes nothing,
+not even a copy. Each runs the same
 cycle: a copy of the Caddyfile beside it, `caddy validate` with the envfile's
 variables in its environment (never in its arguments), `caddy reload`, the
 admin API checked, and every site probed on `127.0.0.1:443` by its name before

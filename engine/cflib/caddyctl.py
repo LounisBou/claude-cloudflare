@@ -152,6 +152,9 @@ class Settings:
         except UnicodeDecodeError:
             raise errors.ConfigError("%s is not UTF-8 text" % self.caddyfile)
 
+    def writable(self):
+        return os.access(self.caddyfile, os.W_OK)
+
     def write(self, text):
         """In place: the file keeps its inode, owner and mode, and a symlink
         keeps pointing where it did."""

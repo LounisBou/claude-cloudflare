@@ -86,11 +86,16 @@ def caddy_status(args, ctx):
         ok, line = settings.validate(variables)
         rows.append({"check": "validate", "state": "ok" if ok else "failed", "detail": None if ok else line})
         if settings.envfile:
-            mode = os.stat(settings.envfile).st_mode & 0o777
-            rows.append({"check": "envfile", "state": "ok",
-                         "detail": "%s: %d variables" % (settings.envfile, len(variables))})
-            if mode & 0o077:
-                warnings.append("%s is readable by others (mode %o): chmod 600 it" % (settings.envfile, mode))
+            try:
+                mode = os.stat(settings.envfile).st_mode & 0o777
+            except OSError as exc:
+                rows.append({"check": "envfile", "state": "unreadable",
+                             "detail": "cannot read the envfile %s: %s" % (settings.envfile, exc.strerror)})
+            else:
+                rows.append({"check": "envfile", "state": "ok",
+                             "detail": "%s: %d variables" % (settings.envfile, len(variables))})
+                if mode & 0o077:
+                    warnings.append("%s is readable by others (mode %o): chmod 600 it" % (settings.envfile, mode))
         else:
             rows.append({"check": "envfile", "state": "-", "detail": "none in the config"})
     state, detail, warning = caddyctl.service(settings)
@@ -128,7 +133,10 @@ def caddy_docs(args, ctx):
 
 def _put_back(settings, original, copy, reason, reloaded):
     """The Caddyfile as it was before the edit, or a ConfigError naming the
-    copy: caddy did not fail, the file did, and caddy runs what it ran."""
+    copy: caddy did not fail, the file did, and caddy runs what it ran.
+    Without a copy nothing was written, and there is nothing to put back."""
+    if copy is None:
+        return
     try:
         settings.write(original)
     except OSError as exc:
@@ -144,28 +152,41 @@ def _put_back(settings, original, copy, reason, reloaded):
                                  % (reason, exc.strerror, running, copy, copy))
 
 
+def _backup(copy):
+    return "; backup: %s" % copy if copy else ""
+
+
 def _rollback(settings, variables, original, copy, hosts, broken, reason):
-    """Put the copy back, validate and reload it, probe again; raise
-    RolledBack, or NotAlive when Caddy still does not answer."""
+    """Put the copy back (a reload with no edit has none), validate and
+    reload it, probe again; raise RolledBack, or NotAlive when Caddy still
+    does not answer."""
     settings.deadline.rolling_back = True
     reason = _late(settings, reason)
     _put_back(settings, original, copy, reason, True)
-    done = "the Caddyfile is restored"
     ok, line = settings.validate(variables)
-    if not ok:
-        done += ", but it does not validate (%s)" % line
+    if copy:
+        done = "the Caddyfile is restored"
+        if not ok:
+            done += ", but it does not validate (%s)" % line
+        else:
+            ok, line = settings.reload(variables)
+            done += " and reloaded" if ok else ", but its reload failed (%s)" % line
     else:
-        ok, line = settings.reload(variables)
-        done += " and reloaded" if ok else ", but its reload failed (%s)" % line
+        done = "the Caddyfile was not changed"
+        if not ok:
+            done += ", and it does not validate (%s)" % line
+        else:
+            ok, line = settings.reload(variables)
+            done += " and is reloaded again" if ok else ", and its reload failed again (%s)" % line
     alive = settings.alive()
     again = caddyctl.probe(hosts, settings)
     still = [h for h in broken if again.get(h) is caddyctl.DOWN]
     if still:
         done += ", still down: " + ", ".join(still)
     if not alive:
-        raise errors.NotAlive("%s; %s, but caddy is not alive after the rollback either: look at it now; backup: %s"
-                              % (reason, done, copy))
-    raise errors.RolledBack("%s; %s; backup: %s" % (reason, done, copy))
+        raise errors.NotAlive("%s; %s, but caddy is not alive after the rollback either: look at it now%s"
+                              % (reason, done, _backup(copy)))
+    raise errors.RolledBack("%s; %s%s" % (reason, done, _backup(copy)))
 
 
 def _late(settings, reason):
@@ -182,8 +203,9 @@ def _terminated(signum, frame):
 
 def cycle(ctx, edit, host=None, removing=False):
     """Run one change through every step. edit(text, blocks, loose) gives the
-    new text; the identity for a reload. Lines: one per host whose status
-    changed (host<TAB>before→after), then backup: <copy>."""
+    new text; the identity for a reload, which writes nothing. Lines: one per
+    host whose status changed (host<TAB>before→after), then backup: <copy>;
+    "reloaded" when a reload has neither."""
     previous = signal.signal(signal.SIGTERM, _terminated)
     try:
         return _cycle(ctx, edit, host, removing)
@@ -205,29 +227,35 @@ def _locked_cycle(settings, edit, host, removing):
     new = edit(original, blocks, loose)
     if host and new == original:
         return "unchanged\t%s" % host
+    # A reload of the file as it is writes nothing: no copy, no rewrite.
+    edited = new != original
+    if edited and not settings.writable():
+        raise errors.ConfigError("cannot write %s: permission denied; nothing was changed" % settings.caddyfile)
     new_blocks, _ = caddyfile.parse(new)
     hosts = sorted(set(caddyfile.hosts(blocks)) | set(caddyfile.hosts(new_blocks)))
     if not settings.alive():
         raise errors.Refused("caddy's admin API does not answer at %s: a reload cannot be checked, "
                              "nor taken back; nothing was changed" % settings.admin)
-    copy = settings.copy(original)
+    copy = settings.copy(original) if edited else None
     before = caddyctl.probe(hosts, settings)
     if settings.deadline.passed():
-        raise errors.Refused("the sites took the cycle's budget of %g seconds to probe; nothing was changed; "
-                             "backup: %s" % (settings.deadline.budget, copy))
-    try:
-        settings.write(new)
-    except OSError as exc:
-        reason = "cannot write %s: %s" % (settings.caddyfile, exc.strerror)
-        _put_back(settings, original, copy, reason, False)
-        raise errors.ConfigError("%s; nothing was changed; backup: %s" % (reason, copy))
+        raise errors.Refused("the sites took the cycle's budget of %g seconds to probe; nothing was changed%s"
+                             % (settings.deadline.budget, _backup(copy)))
+    if edited:
+        try:
+            settings.write(new)
+        except OSError as exc:
+            reason = "cannot write %s: %s" % (settings.caddyfile, exc.strerror)
+            _put_back(settings, original, copy, reason, False)
+            raise errors.ConfigError("%s; nothing was changed%s" % (reason, _backup(copy)))
     reloaded = False
     try:
         ok, line = settings.validate(variables)
         if not ok:
             reason = _late(settings, "caddy validate failed: %s" % line)
             _put_back(settings, original, copy, reason, False)
-            raise errors.RolledBack("%s; the Caddyfile is restored; backup: %s" % (reason, copy))
+            done = "the Caddyfile is restored" if copy else "the Caddyfile was not changed"
+            raise errors.RolledBack("%s; %s%s" % (reason, done, _backup(copy)))
         reloaded = True
         ok, line = settings.reload(variables)
         if not ok:
@@ -249,7 +277,8 @@ def _locked_cycle(settings, edit, host, removing):
         _put_back(settings, original, copy, "interrupted", reloaded)
         raise
     lines = ["%s\t%s→%s" % (h, _status(before[h]), _status(after[h])) for h in hosts if before[h] != after[h]]
-    return "\n".join(lines + ["backup: " + copy])
+    lines += ["backup: " + copy] if copy else []
+    return "\n".join(lines) or "reloaded"
 
 
 def _body(path):

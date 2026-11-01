@@ -1556,14 +1556,14 @@ calls() {
 # copies: how many copies of the Caddyfile lie beside it.
 copies() { ls "$CADDYFILE".bak-* 2>/dev/null | wc -l | tr -d ' '; }
 same() { cmp -s "$1" "$2" && echo same || echo differs; }
-# inject <python> <command> [args...]: cf-write.py's main after the Python
-# (a patch of the engine) has run, in cdyw's environment; OUT, ERR and CODE
+# inject <python> <command> [args...]: the engine's main after the Python
+# (a patch of the engine) has run, in cdy's environment; OUT, ERR and CODE
 # as run sets them. What it prints is not kept: a patch may raise on purpose.
 inject() {
   local patch="$1"
   shift
   env -i PATH="$PATH" HOME="$HOMEDIR" CF_API_BASE="$API" $(caddy_env) \
-    python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import cf; from cflib import caddy, caddyctl; exec(sys.argv[2]); sys.exit(cf.main(sys.argv[3:], writes=True))' \
+    python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import cf; from cflib import caddy, caddyctl; exec(sys.argv[2]); sys.exit(cf.main(sys.argv[3:], writes=not cf.is_read(cf.build_parser(), sys.argv[3])))' \
     "$ENGINE" "$patch" "$@" >"$WORK/out" 2>"$WORK/err"
   CODE=$?
   OUT=$(cat "$WORK/out")
@@ -1621,6 +1621,11 @@ check_contains "caddy-status counts the sites" "$CADDYFILE: 6 sites" "$OUT"
 check_contains "caddy-status says the service loads the envfile" "launchd $PLIST: --envfile $ENVFILE" "$OUT"
 check "caddy-status runs only version and validate" "version validate" "$(calls)"
 check "a launchd service with its envfile gives no warning" "0" "$(printf '%s\n' "$OUT" | grep -c '^warning:')"
+caddy_config "$WORK/caddy-goneenv.json" ", \"envfile\": \"$CADDY/etc/gone.env\""
+CCONF="$WORK/caddy-goneenv.json" inject 'caddyctl.Settings.variables = lambda self: {}' caddy-status
+check "an envfile gone between its reading and its mode is unreadable in caddy-status, no traceback" \
+  "0 $(printf 'envfile\tunreadable')" "$CODE $(printf '%s\n' "$OUT" | grep '^envfile' | cut -f1,2)"
+check "…and nothing else is raised" "" "$ERR"
 
 caddy_config "$WORK/caddy-noenv.json" ", \"service\": \"$CADDY/noenv.plist\""
 CCONF="$WORK/caddy-noenv.json" cdy caddy-status
@@ -1898,15 +1903,24 @@ check "a site that completes the TLS handshake but sends no HTTP line still answ
 check "…its status is reported as no-http" "$(printf 'app.example.com\t200→no-http\nnew.example.com\tdown→200')" \
   "$(printf '%s\n' "$OUT" | sed '$d')"
 
+# mtime <file>: its modification time, in nanoseconds.
+mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"; }
 caddy_reset
+reload_mtime=$(mtime "$CADDYFILE")
 cdyw caddy-reload
 check "caddy-reload validates and reloads the file as it is" "0 validate reload" "$CODE $(calls)"
-check "…and prints the copy" "backup: $(ls "$CADDYFILE".bak-*)" "$OUT"
+check "…and writes nothing: no copy, no rewrite, the same modification time" "reloaded 0 same $reload_mtime" \
+  "$OUT $(copies) $(same "$CADDYFILE" "$ORIGINAL") $(mtime "$CADDYFILE")"
+chmod 444 "$CADDYFILE"
+cdyw caddy-reload
+check "caddy-reload works on a Caddyfile it cannot write" "0" "$CODE"
+chmod 644 "$CADDYFILE"
 caddy_reset
 printf '{"down": ["www.example.com"]}\n{"down": ["www.example.com"]}\n' > "$CSTATE/reload"
 cdyw caddy-reload
 check "caddy-reload with a host down after it exits 6 and names it as still down" "6" "$CODE"
-check_contains "…the error names the host, the reload again and the host still down" "www.example.com went down after the reload; the Caddyfile is restored and reloaded, still down: www.example.com" "$ERR"
+check_contains "…the error names the host, the reload again and the host still down" "www.example.com went down after the reload; the Caddyfile was not changed and is reloaded again, still down: www.example.com" "$ERR"
+check "…and writes nothing either" "0 same" "$(copies) $(same "$CADDYFILE" "$ORIGINAL")"
 
 caddy_reset
 mkdir -p "$CADDY/sudobin"
@@ -2047,7 +2061,8 @@ caddy_reset
 chmod 444 "$CADDYFILE"
 cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a Caddyfile that cannot be written exits 4, unchanged, nothing run" "4 same " "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
-check_contains "…saying nothing was changed" "; nothing was changed; backup: $CADDYFILE.bak-" "$ERR"
+check "…saying nothing was changed, before any copy" "cf: cannot write $CADDYFILE: permission denied; nothing was changed 0" \
+  "$ERR $(copies)"
 chmod 644 "$CADDYFILE"
 
 caddy_reset
