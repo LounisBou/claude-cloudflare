@@ -13,12 +13,14 @@ ENGINE="$ROOT/engine"
 FIXTURES="$ROOT/tests/fixtures"
 WORK=$(mktemp -d)
 SERVER_PID=""
+WORLD_PID=""
 
 OTHER_PID=""
 
 stop() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
   [ -n "$OTHER_PID" ] && kill "$OTHER_PID" 2>/dev/null && wait "$OTHER_PID" 2>/dev/null
+  [ -n "$WORLD_PID" ] && kill "$WORLD_PID" 2>/dev/null && wait "$WORLD_PID" 2>/dev/null
   rm -rf "$WORK"
 }
 trap stop EXIT
@@ -145,11 +147,11 @@ echo "== manifests =="
 
 check "plugin name" "cloudflare" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' "$ROOT/.claude-plugin/plugin.json")"
-check "plugin version" "0.3.0" \
+check "plugin version" "0.4.0" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$ROOT/.claude-plugin/plugin.json")"
 check "plugin license" "MIT" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["license"])' "$ROOT/.claude-plugin/plugin.json")"
-check "marketplace lists the plugin at the same version" "cloudflare 0.3.0" \
+check "marketplace lists the plugin at the same version" "cloudflare 0.4.0" \
   "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["plugins"][0]; print(p["name"], p["version"])' "$ROOT/.claude-plugin/marketplace.json")"
 check "hooks.json names the module" "./register.ts" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["modules"][0])' "$ROOT/hooks/hooks.json")"
@@ -1480,6 +1482,418 @@ cfj '{"command": "workers"}'
 check "e2e: the script is back" "1" "$(printf '%s\n' "$OUT" | grep -c '^tm')"
 check "e2e: …as the module it was" "$(cat "$WORK/new.js")" "$(part_of tm new.js)"
 
+echo "== Caddy: the fixtures =="
+
+# A fake caddy binary (tests/fixtures/caddy/fake-caddy.py) and a fake running
+# Caddy (world.py): a TLS listener standing for 127.0.0.1:443 and an admin
+# API, both answering from world.json, which each fake reload rewrites. The
+# Caddyfile, its envfile and the service files are made under $WORK from the
+# config's paths: nothing of the machine's Caddy is read, run or probed.
+CADDY="$WORK/caddy"
+CSTATE="$CADDY/state"
+mkdir -p "$CADDY/etc" "$CSTATE" "$CADDY/bin"
+openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=example.com -days 2 \
+  -keyout "$CADDY/key.pem" -out "$CADDY/cert.pem" >/dev/null 2>&1 || { echo "openssl could not make the fixture certificate"; exit 1; }
+printf '{"alive": true, "sites": {}}\n' > "$CSTATE/world.json"
+python3 "$FIXTURES/caddy/world.py" "$CSTATE" "$CADDY/cert.pem" "$CADDY/key.pem" "$CADDY/ports" &
+WORLD_PID=$!
+for _ in $(seq 1 50); do
+  [ -s "$CADDY/ports" ] && break
+  sleep 0.1
+done
+read -r TLS_PORT ADMIN_PORT < "$CADDY/ports" || { echo "the fake Caddy did not start"; exit 1; }
+
+CADDY_TOKEN=cf-caddy-fixture-token-5e1d2a9b
+CADDYFILE="$CADDY/etc/Caddyfile"
+ENVFILE="$CADDY/etc/caddy.env"
+PLIST="$CADDY/homebrew.mxcl.caddy.plist"
+UNIT="$CADDY/caddy.service"
+FAKE_CADDY="$FIXTURES/caddy/fake-caddy.py"
+printf '# the DNS-01 token\nCF_API_TOKEN=%s\nLOG=info\n' "$CADDY_TOKEN" > "$ENVFILE"
+chmod 600 "$ENVFILE"
+# plist <path> <with envfile: yes|no>: a launchd service as Homebrew writes it.
+plist() {
+  python3 - "$1" "$2" "$FAKE_CADDY" "$CADDYFILE" "$ENVFILE" <<'PYPLIST'
+import plistlib, sys
+path, with_env, binary, caddyfile, envfile = sys.argv[1:6]
+args = [binary, "run", "--config", caddyfile] + (["--envfile", envfile] if with_env == "yes" else [])
+with open(path, "wb") as fh:
+    plistlib.dump({"Label": "homebrew.mxcl.caddy", "ProgramArguments": args, "RunAtLoad": True}, fh)
+PYPLIST
+}
+plist "$PLIST" yes
+plist "$CADDY/noenv.plist" no
+printf '[Unit]\nDescription=Caddy\n\n[Service]\nUser=caddy\nEnvironmentFile=-%s\nExecStart=/usr/bin/caddy run --config %s\nExecReload=/usr/bin/caddy reload --config %s\n' \
+  "$ENVFILE" "$CADDYFILE" "$CADDYFILE" > "$UNIT"
+printf '[Service]\nExecStart=/usr/bin/caddy run --config %s\n' "$CADDYFILE" > "$CADDY/noenv.service"
+
+# caddy_config <file> [extra keys]: the config with a caddy section on the fakes.
+caddy_config() {
+  printf '{"default_account": "alpha", "env_files": ["~/.env"], "backup_dir": "%s", "caddy": {"manager": "launchd", "binary": "%s", "caddyfile": "%s", "envfile": "%s", "service": "%s", "tls_snippet": "tls_config", "sudo": false, "admin": "127.0.0.1:%s"%s}}\n' \
+    "$WORK/backups" "$FAKE_CADDY" "$CADDYFILE" "$ENVFILE" "$PLIST" "$ADMIN_PORT" "${2:-}" > "$1"
+}
+CADDY_CONFIG="$WORK/caddy-config.json"
+caddy_config "$CADDY_CONFIG"
+# caddy_env: what every Caddy run adds to the engine's environment.
+caddy_env() { printf 'CLAUDE_CLOUDFLARE_CONFIG=%s CF_CADDY_PROBE=127.0.0.1:%s FAKE_CADDY_STATE=%s %s' "${CCONF:-$CADDY_CONFIG}" "$TLS_PORT" "$CSTATE" "${CADDY_EXTRA:-}"; }
+cdy() { EXTRA_ENV="$(caddy_env)" cf "$@"; }
+cdyw() { EXTRA_ENV="$(caddy_env)" cfw "$@"; }
+cdyj() { EXTRA_ENV="$(caddy_env)" cfj "$1"; }
+cdywj() { EXTRA_ENV="$(caddy_env)" cfwj "$1"; }
+
+# caddy_reset: the fixture Caddyfile in place, every site answering 200, no
+# copy, no call recorded, nothing queued for the fake binary.
+caddy_reset() {
+  cp "$FIXTURES/caddy/Caddyfile" "$CADDYFILE"
+  rm -f "$CADDYFILE".bak-* "$CSTATE/validate" "$CSTATE/reload" "$CSTATE/calls.jsonl" "$CSTATE/sudo.log"
+  printf '{"alive": true, "sites": {"app.example.com": 200, "www.example.com": 200, "a.example.com": 200, "b.example.com": 200}}\n' > "$CSTATE/world.json"
+}
+# calls: the fake binary's commands since the last reset, space-separated.
+calls() {
+  [ -f "$CSTATE/calls.jsonl" ] || return 0
+  python3 -c 'import json,sys; print(" ".join(json.loads(l)["argv"][0] for l in open(sys.argv[1])))' "$CSTATE/calls.jsonl"
+}
+# copies: how many copies of the Caddyfile lie beside it.
+copies() { ls "$CADDYFILE".bak-* 2>/dev/null | wc -l | tr -d ' '; }
+same() { cmp -s "$1" "$2" && echo same || echo differs; }
+BODY="$FIXTURES/caddy/body-proxy.caddy"
+ORIGINAL="$FIXTURES/caddy/Caddyfile"
+
+echo "== Caddy: reads =="
+
+caddy_reset
+cdy caddy-sites
+check "caddy-sites lists every site block with its line and its upstreams" \
+  "$(printf 'address\tline\treverse_proxy\n:80\t13\t-\nhttps://app.example.com\t18\t127.0.0.1:8080\nwww.example.com\t24\t-\na.example.com,b.example.com\t34\t127.0.0.1:9000\n*.example.com\t39\t-\nhttp://plain.example.com\t44\t-')" \
+  "$OUT"
+check "caddy-sites runs no caddy" "" "$(calls)"
+cdy caddy-sites --json
+check "caddy-sites --json gives the blocks, snippets and global options included" "global snippet site site site site site site" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(" ".join(b["kind"] for b in json.load(sys.stdin)))')"
+
+cdy caddy-site www.example.com
+check "caddy-site prints the block as written, its quoted, commented and heredoc braces included" \
+  "$(sed -n 24,32p "$ORIGINAL")" "$OUT"
+cdy caddy-site b.example.com
+check "caddy-site finds a host in a block of several" "$(sed -n 34,37p "$ORIGINAL")" "$OUT"
+cdy caddy-site zz.example.com
+check "caddy-site serves a host covered by a wildcard from the wildcard's block" "$(sed -n 39,42p "$ORIGINAL")" "$OUT"
+cdy caddy-site nothere.example.org
+check "caddy-site on a host with no block exits 2" "2" "$CODE"
+check_contains "…naming the Caddyfile" "cf: no site block for nothere.example.org in $CADDYFILE" "$ERR"
+cdy caddy-site 'bad host'
+check "caddy-site refuses a host that is not a name" "2" "$CODE"
+cdy caddy-site app.example.com --json
+check "caddy-site --json gives the block's address and lines" "https://app.example.com 18 22" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; b=json.load(sys.stdin)[0]; print(b["address"], b["line"], b["end_line"])')"
+
+cdy caddy-status
+check "caddy-status checks the binary, the admin API, the Caddyfile, validate, the envfile and the service" \
+  "$(printf 'check\tstate\nbinary\tok\nadmin\talive\ncaddyfile\tok\nvalidate\tok\nenvfile\tok\nservice\tok')" \
+  "$(printf '%s\n' "$OUT" | cut -f1,2)"
+check_contains "caddy-status names the version" "v2.8.4" "$OUT"
+check_contains "caddy-status counts the sites" "$CADDYFILE: 6 sites" "$OUT"
+check_contains "caddy-status says the service loads the envfile" "launchd $PLIST: --envfile $ENVFILE" "$OUT"
+check "caddy-status runs only version and validate" "version validate" "$(calls)"
+check "a launchd service with its envfile gives no warning" "0" "$(printf '%s\n' "$OUT" | grep -c '^warning:')"
+
+caddy_config "$WORK/caddy-noenv.json" ", \"service\": \"$CADDY/noenv.plist\""
+CCONF="$WORK/caddy-noenv.json" cdy caddy-status
+check "a launchd service without --envfile is a warning" \
+  "warning: $CADDY/noenv.plist does not start caddy with --envfile $ENVFILE: a restart of the service would run caddy without its variables" \
+  "$(printf '%s\n' "$OUT" | grep '^warning:')"
+check "…and its row says so" "$(printf 'service\tno-envfile')" "$(printf '%s\n' "$OUT" | grep '^service' | cut -f1,2)"
+
+caddy_config "$WORK/caddy-systemd.json" ", \"manager\": \"systemd\", \"service\": \"$UNIT\""
+CCONF="$WORK/caddy-systemd.json" cdy caddy-status
+check "a systemd unit with EnvironmentFile= is ok" "$(printf 'service\tok\tsystemd %s: EnvironmentFile=%s' "$UNIT" "$ENVFILE")" \
+  "$(printf '%s\n' "$OUT" | grep '^service')"
+mkdir -p "$CADDY/dropin.service.d"
+printf '[Service]\nExecStart=/usr/bin/caddy run\n' > "$CADDY/dropin.service"
+printf '[Service]\nEnvironmentFile=%s\n' "$ENVFILE" > "$CADDY/dropin.service.d/override.conf"
+caddy_config "$WORK/caddy-dropin.json" ", \"manager\": \"systemd\", \"service\": \"$CADDY/dropin.service\""
+CCONF="$WORK/caddy-dropin.json" cdy caddy-status
+check "a systemd drop-in beside the unit counts" "$(printf 'service\tok')" "$(printf '%s\n' "$OUT" | grep '^service' | cut -f1,2)"
+caddy_config "$WORK/caddy-systemd-noenv.json" ", \"manager\": \"systemd\", \"service\": \"$CADDY/noenv.service\""
+CCONF="$WORK/caddy-systemd-noenv.json" cdy caddy-status
+check "a systemd unit without EnvironmentFile= is a warning" \
+  "warning: $CADDY/noenv.service has no EnvironmentFile=$ENVFILE: a restart of the service would run caddy without its variables" \
+  "$(printf '%s\n' "$OUT" | grep '^warning:')"
+
+chmod 644 "$ENVFILE"
+cdy caddy-status
+check "an envfile others can read is a warning" "warning: $ENVFILE is readable by others (mode 644): chmod 600 it" \
+  "$(printf '%s\n' "$OUT" | grep '^warning:')"
+chmod 600 "$ENVFILE"
+
+printf '{"alive": false, "sites": {}}\n' > "$CSTATE/world.json"
+cdy caddy-status
+check "caddy-status says when the admin API does not answer" "$(printf 'admin\tdown')" "$(printf '%s\n' "$OUT" | grep '^admin' | cut -f1,2)"
+check_contains "…with a warning" "warning: caddy's admin API does not answer" "$OUT"
+
+caddy_reset
+printf 'fail adapting config using caddyfile: Caddyfile:20: unrecognized directive: revers_proxy\n' > "$CSTATE/validate"
+cdy caddy-status
+check "caddy-status shows the line validate failed on" \
+  "$(printf 'validate\tfailed\tError: adapting config using caddyfile: Caddyfile:20: unrecognized directive: revers_proxy')" \
+  "$(printf '%s\n' "$OUT" | grep '^validate')"
+
+cdy caddy-docs
+check "caddy-docs prints the index" "# Caddy" "$(printf '%s\n' "$OUT" | head -1 | cut -c1-7)"
+for topic in $(ls "$ROOT/docs/caddy" | sed -n 's/\.md$//p' | grep -v '^index$'); do
+  check_contains "the index names $topic" "\`$topic\`" "$(cat "$ROOT/docs/caddy/index.md")"
+done
+cdy caddy-docs reverse-proxy
+check "caddy-docs <topic> prints the topic file" "$(cat "$ROOT/docs/caddy/reverse-proxy.md")" "$OUT"
+cdy caddy-docs nope
+check "an unknown topic exits 2" "2" "$CODE"
+check_contains "…and lists the topics" "topics: " "$ERR"
+cdy caddy-docs ../README
+check "a topic cannot climb out of the docs" "2" "$CODE"
+check "every Caddy digest is under 150 lines" "" \
+  "$(for f in "$ROOT"/docs/caddy/*.md; do [ "$(wc -l < "$f")" -lt 150 ] || echo "$f"; done)"
+check "the docs make at least ten digests and an index" "yes" \
+  "$([ "$(ls "$ROOT"/docs/caddy/*.md | wc -l)" -ge 11 ] && echo yes || echo no)"
+
+echo "== Caddy: site writes =="
+
+caddy_reset
+cdy caddy-site-set new.example.com --body-file "$BODY"
+check "cf.py refuses a Caddy write" "2 cf: caddy-site-set writes: use cf-write.py" "$CODE $ERR"
+
+caddy_reset
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "caddy-site-set on a new host exits 0" "0" "$CODE"
+copy=$(backup_of)
+check "…prints the host whose status changed, then the copy" \
+  "$(printf 'new.example.com\tdown→200\nbackup: %s' "$copy")" "$OUT"
+check "…appends the block and keeps every other byte" "same" "$(same "$CADDYFILE" "$FIXTURES/caddy/expected-set-new")"
+check "…copies the Caddyfile first, beside it, with a UTC timestamp" "1" \
+  "$(printf '%s\n' "${copy#"$CADDYFILE"}" | grep -cE '^\.bak-20[0-9]{6}T[0-9]{6}\.[0-9]{6}Z$')"
+check "…the copy holds the Caddyfile as it was" "same" "$(same "$copy" "$ORIGINAL")"
+check "…the copy is private" "600" "$(stat -f '%Lp' "$copy" 2>/dev/null || stat -c '%a' "$copy")"
+check "…validates, then reloads" "validate reload" "$(calls)"
+check "validate and reload name the Caddyfile and its adapter in their argv" \
+  "$(printf 'validate --config %s --adapter caddyfile\nreload --config %s --adapter caddyfile' "$CADDYFILE" "$CADDYFILE")" \
+  "$(python3 -c 'import json,sys; [print(" ".join(json.loads(l)["argv"])) for l in open(sys.argv[1])]' "$CSTATE/calls.jsonl")"
+check "the envfile's variables reach caddy through its environment" "$CADDY_TOKEN $CADDY_TOKEN" \
+  "$(python3 -c 'import json,sys; print(" ".join(json.loads(l)["env"].get("CF_API_TOKEN", "-") for l in open(sys.argv[1])))' "$CSTATE/calls.jsonl")"
+check "the envfile's values never reach caddy's argv" "0" \
+  "$(python3 -c 'import json,sys; print(sum(sys.argv[2] in " ".join(json.loads(l)["argv"]) for l in open(sys.argv[1])))' "$CSTATE/calls.jsonl" "$CADDY_TOKEN")"
+cdy caddy-sites
+check "caddy-sites shows the new block" "$(printf 'https://new.example.com\t48\t127.0.0.1:3000')" "$(printf '%s\n' "$OUT" | tail -1)"
+
+caddy_reset
+cdyw caddy-site-set app.example.com --body-file "$BODY"
+check "caddy-site-set on an existing host replaces its block, address as written, every other byte kept" "same" \
+  "$(same "$CADDYFILE" "$FIXTURES/caddy/expected-set-app")"
+check "…and prints only the copy when no status changed" "backup: $(backup_of)" "$OUT"
+rm -f "$CSTATE/calls.jsonl"
+cdyw caddy-site-set app.example.com --body-file "$BODY"
+check "the same block again changes nothing and runs nothing" "$(printf 'unchanged\tapp.example.com') " "$OUT $(calls)"
+check "…and makes no copy" "1" "$(copies)"
+
+caddy_reset
+cdyw caddy-site-set www.example.com --body-file "$BODY"
+check "a block with braces in quotes, comments and a heredoc is replaced whole" \
+  "$(sed -n 1,23p "$ORIGINAL"; printf 'www.example.com {\n\timport tls_config\n\treverse_proxy 127.0.0.1:3000\n}\n'; sed -n '33,$p' "$ORIGINAL")" \
+  "$(cat "$CADDYFILE")"
+
+caddy_reset
+cdyw caddy-site-remove www.example.com
+check "caddy-site-remove exits 0" "0" "$CODE"
+check "…removes the block and one blank line, every other byte kept" "same" "$(same "$CADDYFILE" "$FIXTURES/caddy/expected-remove-www")"
+check "…prints the removed host's status, then the copy" "$(printf 'www.example.com\t200→down\nbackup: %s' "$(backup_of)")" "$OUT"
+check "…a host going down because its block was removed is no rollback" "validate reload" "$(calls)"
+
+caddy_reset
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+cdyw caddy-site-remove new.example.com
+check "set then remove gives the Caddyfile back byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+
+caddy_reset
+cdyw caddy-site-set HTTPS://New.Example.com --body-file "$BODY"
+check "a host is read without regard to case or an https:// prefix" "same" "$(same "$CADDYFILE" "$FIXTURES/caddy/expected-set-new")"
+
+echo "== Caddy: what is refused =="
+
+caddy_reset
+cdyw caddy-site-set a.example.com --body-file "$BODY"
+check "a block of several addresses is refused with exit 5" "5" "$CODE"
+check_contains "…naming the block" "cf: a.example.com is in the block of line 34 with other addresses (a.example.com, b.example.com)" "$ERR"
+cdyw caddy-site-remove b.example.com
+check "…and is not removed either" "5" "$CODE"
+cdyw caddy-site-set '*.example.com' --body-file "$BODY"
+check "a wildcard host is refused with exit 5" "5" "$CODE"
+check "nothing refused was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+
+cdyw caddy-site-remove nothere.example.com
+check "removing a host with no block exits 2" "2" "$CODE"
+cdyw caddy-site-set 'a b.example.com' --body-file "$BODY"
+check "a host that is not a name exits 2" "2" "$CODE"
+cdyw caddy-site-set new.example.com --body-file "$WORK/absent.caddy"
+check "a body file that cannot be read exits 2" "2" "$CODE"
+printf 'reverse_proxy 127.0.0.1:3000 {\n' > "$WORK/open.caddy"
+cdyw caddy-site-set new.example.com --body-file "$WORK/open.caddy"
+check "a body whose braces do not balance exits 2" "2" "$CODE"
+printf '}\nevil.example.com {\n' > "$WORK/close.caddy"
+cdyw caddy-site-set new.example.com --body-file "$WORK/close.caddy"
+check "a body that closes the block early exits 2" "2" "$CODE"
+printf '\n\n' > "$WORK/empty.caddy"
+cdyw caddy-site-set new.example.com --body-file "$WORK/empty.caddy"
+check "an empty body exits 2" "2" "$CODE"
+check "nothing refused was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+
+printf 'example.com {\n\trespond "x"\n' > "$CADDYFILE"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a Caddyfile whose braces do not balance is refused with exit 5" "5" "$CODE"
+printf 'example.com\nrespond "x"\n' > "$CADDYFILE"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a site without braces is refused with exit 5" "5" "$CODE"
+printf 'import sites/*\n\nexample.com {\n\trespond "x"\n}\n' > "$CADDYFILE"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a top-level import is no obstacle" "0" "$CODE"
+check "no copy is left by the refused edits" "1" "$(copies)"
+
+caddy_reset
+chmod 000 "$ENVFILE"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "an envfile that cannot be read exits 4 before anything changes" "4 same 0" "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies)"
+chmod 600 "$ENVFILE"
+
+printf '{"backup_dir": "%s"}\n' "$WORK/backups" > "$WORK/nocaddy.json"
+CCONF="$WORK/nocaddy.json" cdy caddy-sites
+check "no caddy section in the config exits 4" "4" "$CODE"
+check_contains "…saying so" "no caddy section" "$ERR"
+caddy_config "$WORK/caddy-unix.json" ', "admin": "unix//run/caddy-admin.sock"'
+CCONF="$WORK/caddy-unix.json" cdyw caddy-reload
+check "an admin API on a unix socket is refused with exit 4" "4" "$CODE"
+caddy_config "$WORK/caddy-badsudo.json" ', "sudo": "yes"'
+CCONF="$WORK/caddy-badsudo.json" cdy caddy-sites
+check "a caddy key of the wrong type exits 4" "4" "$CODE"
+
+echo "== Caddy: validate, reload and rollback =="
+
+caddy_reset
+printf 'fail adapting config using caddyfile: Caddyfile:50: unrecognized directive: revers_proxy\n' > "$CSTATE/validate"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a validate failure exits 6" "6" "$CODE"
+check "…restores the Caddyfile byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+check "…reloads nothing" "validate" "$(calls)"
+check "…and gives Caddy's error line and the copy" \
+  "cf: caddy validate failed: Error: adapting config using caddyfile: Caddyfile:50: unrecognized directive: revers_proxy; the Caddyfile is restored; backup: $(ls "$CADDYFILE".bak-*)" \
+  "$ERR"
+
+caddy_reset
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a host going down after the reload exits 6" "6" "$CODE"
+check "…restores the Caddyfile byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+check "…validates and reloads the restored file" "validate reload validate reload" "$(calls)"
+check "…the second reload had the restored file" "same" "$(same "$CADDYFILE" "$(ls "$CADDYFILE".bak-*)")"
+check "…and names the host and the copy" \
+  "cf: app.example.com went down after the reload; the Caddyfile is restored and reloaded; backup: $(ls "$CADDYFILE".bak-*)" \
+  "$ERR"
+check "…and the site answers again" "app.example.com" \
+  "$(python3 -c 'import json,sys; print(" ".join(h for h in json.load(open(sys.argv[1]))["sites"] if h == "app.example.com"))' "$CSTATE/world.json")"
+
+caddy_reset
+printf '{"alive": false}\n{"alive": false}\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "caddy still not alive after the rollback exits 7" "7" "$CODE"
+check "…the Caddyfile is restored all the same" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…and says to look now" "caddy is not alive after the rollback either" "$ERR"
+check_contains "…naming the copy" "backup: $CADDYFILE.bak-" "$ERR"
+
+caddy_reset
+printf '{"alive": false}\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "caddy not alive after the reload but alive after the rollback exits 6" "6" "$CODE"
+check_contains "…saying why" "cf: caddy's admin API did not answer after the reload; the Caddyfile is restored and reloaded" "$ERR"
+
+caddy_reset
+printf 'fail loading config: tls: certificate store is locked\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a reload failure exits 6, the Caddyfile restored" "6 same" "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…with Caddy's error line" "cf: caddy reload failed: Error: loading config: tls: certificate store is locked; the Caddyfile is restored and reloaded" "$ERR"
+
+caddy_reset
+printf '{"status": {"app.example.com": 502}}\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a status change is reported, not rolled back" "0" "$CODE"
+check "…one line per host whose status changed" "$(printf 'app.example.com\t200→502\nnew.example.com\tdown→200')" "$(printf '%s\n' "$OUT" | sed '$d')"
+
+caddy_reset
+cdyw caddy-reload
+check "caddy-reload validates and reloads the file as it is" "0 validate reload" "$CODE $(calls)"
+check "…and prints the copy" "backup: $(ls "$CADDYFILE".bak-*)" "$OUT"
+caddy_reset
+printf '{"down": ["www.example.com"]}\n{"down": ["www.example.com"]}\n' > "$CSTATE/reload"
+cdyw caddy-reload
+check "caddy-reload with a host down after it exits 6 and names it as still down" "6" "$CODE"
+check_contains "…" "www.example.com went down after the reload; the Caddyfile is restored and reloaded, still down: www.example.com" "$ERR"
+
+caddy_reset
+mkdir -p "$CADDY/sudobin"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/sudo.log"\n[ "$1" = "-n" ] || exit 1\nshift\ncase "$1" in --preserve-env=*) shift ;; esac\nexec "$@"\n' "$CSTATE" > "$CADDY/sudobin/sudo"
+chmod +x "$CADDY/sudobin/sudo"
+caddy_config "$WORK/caddy-sudo.json" ', "sudo": true'
+CCONF="$WORK/caddy-sudo.json" CADDY_EXTRA="PATH=$CADDY/sudobin:$PATH" cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "with sudo: true the cycle runs" "0" "$CODE"
+check "…every caddy call goes through sudo -n, keeping the envfile's names, never its values" \
+  "$(printf -- '-n --preserve-env=CF_API_TOKEN,LOG %s validate --config %s --adapter caddyfile\n-n --preserve-env=CF_API_TOKEN,LOG %s reload --config %s --adapter caddyfile' "$FAKE_CADDY" "$CADDYFILE" "$FAKE_CADDY" "$CADDYFILE")" \
+  "$(cat "$CSTATE/sudo.log")"
+
+check "no stop, restart or service command anywhere in the engine" "" \
+  "$(grep -rnE 'brew services|systemctl (re)?start|systemctl stop|launchctl|caddy stop|"stop"|"restart"' "$ENGINE" 2>/dev/null)"
+
+caddy_reset
+caddy_config "$WORK/caddy-nobinary.json" ", \"binary\": \"$CADDY/bin/absent\""
+CCONF="$WORK/caddy-nobinary.json" cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a caddy binary that cannot run fails validate: exit 6, the Caddyfile restored" "6 same" "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…naming the binary" "cf: caddy validate failed: cannot run $CADDY/bin/absent" "$ERR"
+
+caddy_reset
+chmod 444 "$CADDYFILE"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a Caddyfile that cannot be written exits 4, unchanged, nothing run" "4 same " "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
+check_contains "…naming the copy" "; nothing was changed; backup: $CADDYFILE.bak-" "$ERR"
+chmod 644 "$CADDYFILE"
+
+caddy_reset
+printf '{"alive": false, "sites": {}}\n' > "$CSTATE/world.json"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a Caddy whose admin API does not answer is not touched: exit 5" "5" "$CODE"
+check "…nothing written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+
+caddy_reset
+printf 'fail invalid token %s\n' "$CADDY_TOKEN" > "$CSTATE/validate"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a value of the envfile that caddy echoes is masked" \
+  "cf: caddy validate failed: Error: invalid token [token]; the Caddyfile is restored; backup: $(ls "$CADDYFILE".bak-*)" "$ERR"
+
+echo "== end to end: a Caddy cycle through the tool's requests =="
+
+caddy_reset
+cdywj "{\"command\": \"caddy-site-set\", \"args\": {\"host\": \"new.example.com\", \"body-file\": \"$BODY\"}}"
+check "e2e: caddy-site-set on a new host" "$(printf 'new.example.com\tdown→200')" "$(printf '%s\n' "$OUT" | head -1)"
+cdyj '{"command": "caddy-sites"}'
+check "e2e: caddy-sites shows it" "1" "$(printf '%s\n' "$OUT" | grep -c '^https://new.example.com	')"
+check "e2e: every other byte kept" "same" "$(same "$CADDYFILE" "$FIXTURES/caddy/expected-set-new")"
+cp "$CADDYFILE" "$WORK/caddy-before-break"
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+cdywj "{\"command\": \"caddy-site-set\", \"args\": {\"host\": \"new.example.com\", \"body-file\": \"$WORK/open.caddy\"}}"
+check "e2e: a broken body is refused before anything changes" "2" "$CODE"
+printf 'respond "v2"\n' > "$WORK/v2.caddy"
+cdywj "{\"command\": \"caddy-site-set\", \"args\": {\"host\": \"new.example.com\", \"body-file\": \"$WORK/v2.caddy\"}}"
+check "e2e: a change that breaks a running host is rolled back, exit 6" "6" "$CODE"
+check "e2e: the file is identical to before" "same" "$(same "$CADDYFILE" "$WORK/caddy-before-break")"
+cdywj '{"command": "caddy-site-remove", "args": {"host": "new.example.com"}}'
+check "e2e: caddy-site-remove" "0" "$CODE"
+check "e2e: the Caddyfile is the original again" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+CCONF="$WORK/caddy-noenv.json" cdyj '{"command": "caddy-status"}'
+check_contains "e2e: caddy-status warns of the service without its envfile" "warning: $CADDY/noenv.plist does not start caddy with --envfile" "$OUT"
+
 echo "== install.sh and the doctor =="
 
 # inst [args...]: install.sh in the same scrubbed environment as the engine.
@@ -1553,7 +1967,9 @@ check "the request log holds the multipart bodies as sent" "yes" "$(grep -q '"__
 check "no request the engine sent holds a fixture token" "0" \
   "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$REQUESTS")"
 check "no backup holds a fixture token" "" \
-  "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$WORK/backups" 2>/dev/null)"
+  "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$CADDY_TOKEN" "$WORK/backups" 2>/dev/null)"
+check "no Caddyfile or copy of it holds the envfile's token" "" \
+  "$(grep -lF "$CADDY_TOKEN" "$CADDYFILE" "$CADDYFILE".bak-* 2>/dev/null)"
 check "the engine prints no traceback" "0" "$(grep -c 'Traceback' "$CAPTURED")"
 
 echo "== the mod and the engine agree =="
@@ -1598,7 +2014,7 @@ echo "== no output holds a token =="
 
 # Every output the engine printed, and the mod's test log.
 check "no output of the engine or of the mod holds a fixture token" "0" \
-  "$(cat "$CAPTURED" "$WORK/mod.log" 2>/dev/null | grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA")"
+  "$(cat "$CAPTURED" "$WORK/mod.log" 2>/dev/null | grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA|$CADDY_TOKEN")"
 
 echo
 echo "$pass passed, $fail failed, $skip skipped"

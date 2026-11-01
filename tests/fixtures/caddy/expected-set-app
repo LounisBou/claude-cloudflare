@@ -1,0 +1,45 @@
+# Global options
+{
+	email admin@example.com
+	admin localhost:2019
+}
+
+(tls_config) {
+	tls {
+		dns cloudflare {$CF_API_TOKEN}
+	}
+}
+
+:80 {
+	respond "ok {host}" 200
+}
+
+# The application
+https://app.example.com {
+	import tls_config
+	reverse_proxy 127.0.0.1:3000
+}
+
+www.example.com {
+	import tls_config
+	@old path /old/*   # a comment holding a } brace
+	redir @old /new{uri} 301
+	header X-Note "a { quoted brace"
+	respond <<HTML
+		<p>a } in a heredoc</p>
+		HTML 200
+}
+
+a.example.com, b.example.com {
+	import tls_config
+	reverse_proxy 127.0.0.1:9000
+}
+
+*.example.com {
+	import tls_config
+	respond "wildcard"
+}
+
+http://plain.example.com {
+	respond "plain"
+}

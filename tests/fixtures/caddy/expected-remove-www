@@ -1,0 +1,36 @@
+# Global options
+{
+	email admin@example.com
+	admin localhost:2019
+}
+
+(tls_config) {
+	tls {
+		dns cloudflare {$CF_API_TOKEN}
+	}
+}
+
+:80 {
+	respond "ok {host}" 200
+}
+
+# The application
+https://app.example.com {
+	import tls_config
+	log
+	reverse_proxy 127.0.0.1:8080
+}
+
+a.example.com, b.example.com {
+	import tls_config
+	reverse_proxy 127.0.0.1:9000
+}
+
+*.example.com {
+	import tls_config
+	respond "wildcard"
+}
+
+http://plain.example.com {
+	respond "plain"
+}
