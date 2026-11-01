@@ -91,7 +91,9 @@ Prints `created` and the record's columns. Proxied is Cloudflare's default
 ### `dns-update <zone> <record> [--from-type T] [--type T] [--name N] [--content C] [--ttl S] [--proxied|--no-proxied] [--priority P] [--comment C]` (write)
 
 Overwrites the record with the fields given, its type included (a CNAME into
-an A keeps its id). A type that cannot be proxied drops the proxy. When the
+an A keeps its id). A type change needs `--content`, and leaves behind the
+fields of the old type (`priority`, `data`) unless given again. A type that
+cannot be proxied drops the proxy. When the
 name has several records, `--from-type` picks by type, else name it by its id.
 Prints `before` and `after` lines.
 

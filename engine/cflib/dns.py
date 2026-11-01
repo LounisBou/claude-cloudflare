@@ -15,6 +15,9 @@ _RECORD_ID = re.compile(r"^[0-9a-f]{32}$")
 PROXIABLE = ("A", "AAAA", "CNAME")
 # The fields a record is written with, and compared on by restore.
 _WRITTEN = ("type", "name", "content", "ttl", "proxied", "priority", "comment", "tags", "data")
+# The fields a record keeps when its type changes: the others belong to the
+# old type, and only the arguments given set them for the new one.
+_ANY_TYPE = ("name", "ttl", "proxied", "comment", "tags")
 COLUMNS = ["type", "name", "content", "proxied", "ttl", "id"]
 
 
@@ -177,7 +180,13 @@ def dns_update(args, ctx):
     if not changes:
         raise errors.UsageError("nothing to change: pass type, name, content, ttl, proxied, priority or comment")
     current = one(ctx, zone, args.record, args.from_type)
-    record = dict(current, **changes)
+    if changes.get("type", current["type"]) != current["type"]:
+        if "content" not in changes:
+            raise errors.UsageError("%s changes from %s to %s: pass the --content of the new type"
+                                    % (current["name"], current["type"], changes["type"]))
+        record = dict({k: current[k] for k in _ANY_TYPE if k in current}, **changes)
+    else:
+        record = dict(current, **changes)
     moved = [current["type"], record["type"]]
     path = save(ctx, zone, [current["name"], record["name"]], {current["name"]: moved, record["name"]: moved})
     with backed_by(path):

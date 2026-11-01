@@ -409,6 +409,22 @@ update_bk=$(backup_of)
 check "the backup of an update holds the record before it" "CNAME www.example.com" \
   "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["data"]["records"][0]; print(r["type"], r["content"])' "$update_bk")"
 check "dns-update overwrites the record" "1" "$(sent | grep -c '^PUT /zones/.*/dns_records/')"
+# put_keys: the fields of the last PUT the server received.
+put_keys() {
+  curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+print(" ".join(sorted([r for r in json.load(sys.stdin) if r["method"] == "PUT"][-1]["body"])))'
+}
+check "a CNAME turned into an A is sent with the fields of an A" "content name proxied ttl type" "$(put_keys)"
+
+reset
+cfw dns-update example.com app --type A
+check "a type changed without its content exits 2" \
+  "2 cf: app.example.com changes from CNAME to A: pass the --content of the new type" "$CODE $ERR"
+check "a type changed without its content sends no write" "" "$(sent | grep -v '^GET')"
+cfw dns-update example.com @ --from-type MX --type A --content 203.0.113.12
+check "an MX turned into an A leaves its priority behind" "content name proxied ttl type" "$(put_keys)"
+reset
 
 cfw dns-update example.com app
 check "dns-update with nothing to change exits 2" "2 cf: nothing to change: pass type, name, content, ttl, proxied, priority or comment" "$CODE $ERR"
