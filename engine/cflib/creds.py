@@ -12,6 +12,9 @@ import re
 from . import errors
 
 _TOKEN_KEY = re.compile(r"^([A-Za-z0-9]+(?:_[A-Za-z0-9]+)*)_CLOUDFLARE_API_TOKEN$")
+# Inside a token, a blank or a control character could end the Authorization
+# header and start another one.
+_UNSAFE = re.compile(r"[\s\x00-\x1f\x7f-\x9f]")
 ENVIRONMENT = "environment"
 
 
@@ -70,8 +73,13 @@ def token(account):
         value = os.environ.get(key)
     else:
         value = read_env_file(account.source).get(key)
+    value = (value or "").strip()
     if not value:
         raise errors.ConfigError("no token for account %s in %s" % (account.name, account.source))
+    if _UNSAFE.search(value):
+        raise errors.ConfigError(
+            "the token of account %s holds a blank or a control character: set it again" % account.name
+        )
     return value
 
 
@@ -80,6 +88,6 @@ def secrets(env_files):
     values = set()
     for source in [dict(os.environ)] + [read_env_file(p) for p in env_files]:
         for key, value in source.items():
-            if _TOKEN_KEY.match(key) and value:
-                values.add(value)
+            if _TOKEN_KEY.match(key) and value.strip():
+                values.update((value, value.strip()))
     return values

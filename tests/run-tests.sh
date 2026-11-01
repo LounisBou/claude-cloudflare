@@ -97,13 +97,14 @@ printf '{"default_account": "alpha", "env_files": ["~/.env"], "backup_dir": "%s"
 
 # run <entry> [args...]: the engine in a scrubbed environment; stdout in OUT,
 # stderr in ERR, the exit code in CODE. Every output is also kept in CAPTURED.
+# EXTRA_ENV adds variables split on blanks, RAW_ENV one variable kept whole.
 CAPTURED="$WORK/captured"
 : > "$CAPTURED"
 run() {
   local entry="$1"
   shift
   env -i PATH="$PATH" HOME="$HOMEDIR" CLAUDE_CLOUDFLARE_CONFIG="$CONFIG" CF_API_BASE="$API" \
-    BETA_CLOUDFLARE_API_TOKEN="$TOKEN_BETA" ${EXTRA_ENV:-} \
+    BETA_CLOUDFLARE_API_TOKEN="$TOKEN_BETA" ${EXTRA_ENV:-} ${RAW_ENV:+"$RAW_ENV"} \
     python3 "$ENGINE/$entry" "$@" >"$WORK/out" 2>"$WORK/err" <"${STDIN:-/dev/null}"
   CODE=$?
   OUT=$(cat "$WORK/out")
@@ -156,6 +157,16 @@ check "an account name is read without regard to case" "beta" "$(printf '%s\n' "
 
 EXTRA_ENV="ALPHA_CLOUDFLARE_API_TOKEN=$TOKEN_BETA" cf auth-check
 check "the environment wins over an env file" "tok-beta" "$(printf '%s\n' "$OUT" | tail -1 | cut -f3)"
+
+RAW_ENV="ALPHA_CLOUDFLARE_API_TOKEN=$(printf '  %s\t' "$TOKEN_ALPHA")" cf auth-check
+check "a token is read without the blanks around it" "alpha	active	tok-alpha" "$(printf '%s\n' "$OUT" | tail -1 | cut -f1-3)"
+RAW_ENV="ALPHA_CLOUDFLARE_API_TOKEN=$(printf '%s\nX-Injected: 1' "$TOKEN_ALPHA")" cf auth-check
+check "a token holding a line break exits 4" "4" "$CODE"
+check "a token holding a line break is refused without being shown" \
+  "cf: the token of account alpha holds a blank or a control character: set it again" "$ERR"
+reset
+RAW_ENV="ALPHA_CLOUDFLARE_API_TOKEN=$(printf '%s\x01' "$TOKEN_ALPHA")x" cf zones
+check "a token holding a control character exits 4 and sends nothing" "4 " "$CODE $(sent)"
 
 cf auth-check --account gamma
 check "an unknown account exits 4" "4" "$CODE"
