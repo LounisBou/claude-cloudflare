@@ -242,6 +242,204 @@ check "stdin json refuses an unknown command" "2 cf: unknown command: rm -rf" "$
 cfj '{"command": "zones", "account": 3}'
 check "stdin json refuses an account that is not a string" "2" "$CODE"
 
+echo "== DNS reads =="
+
+# lines: OUT's lines without the id column, the header dropped.
+lines() { printf '%s\n' "$OUT" | sed 1d | cut -f1-5; }
+backup_of() { printf '%s\n' "$OUT" | sed -n 's/^backup: //p'; }
+
+reset
+cf dns-list example.com
+check "dns-list prints a header and one line per record, every page read" "8" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')"
+check "dns-list header" "$(printf 'type\tname\tcontent\tproxied\tttl\tid')" "$(printf '%s\n' "$OUT" | head -1)"
+check "dns-list shows a proxied record with an automatic ttl" "A	www.example.com	203.0.113.10	yes	auto" "$(lines | awk -F'\t' '$2 == "www.example.com"')"
+check "dns-list puts the priority before an MX target" "MX	example.com	10 mail.example.com	no	3600" "$(lines | grep MX)"
+check "dns-list reads four pages" "4" "$(sent | grep -c dns_records)"
+
+cf dns-list example.com --type TXT
+check "dns-list --type filters" "3" "$(lines | wc -l | tr -d ' ')"
+reset
+cf dns-list example.com --name www
+check "dns-list --name takes a name relative to the zone" \
+  "GET /zones/0123456789abcdef0123456789abcdef/dns_records?name=www.example.com" "$(sent | tail -1)"
+cf dns-list 0123456789abcdef0123456789abcdef --name @ --type A
+check "dns-list takes a zone id, and @ for the apex" "A	example.com	203.0.113.10	yes	auto" "$(lines)"
+cf dns-list nope.example
+check "an unknown zone exits 2" "2 cf: no zone nope.example on account alpha" "$CODE $ERR"
+
+cf dns-get example.com app
+check "dns-get finds a record by name" "CNAME	app.example.com	www.example.com	yes	auto" "$(lines)"
+app_id=$(printf '%s\n' "$OUT" | sed -n 2p | cut -f6)
+cf dns-get example.com "$app_id"
+check "dns-get finds a record by id" "CNAME	app.example.com	www.example.com	yes	auto" "$(lines)"
+cf dns-get example.com multi.example.com
+check "dns-get lists every record of a name" "2" "$(lines | wc -l | tr -d ' ')"
+cf dns-get example.com missing
+check "dns-get of no record exits 2" "2 cf: no record missing.example.com in example.com" "$CODE $ERR"
+cf dns-get example.com www --json
+check "dns-get --json gives the full objects" "203.0.113.10 0123456789abcdef0123456789abcdef" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; r=json.load(sys.stdin)[0]; print(r["content"], r["zone_id"])')"
+
+cf dns-export example.com
+check_contains "dns-export gives the zone file" "$(printf 'www.example.com.\t300\tIN\tA\t203.0.113.10')" "$OUT"
+cf dns-export example.com --json
+check "dns-export --json gives every record" "7" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+
+echo "== DNS writes and backups =="
+
+cf dns-create example.com --type A --name new --content 203.0.113.5
+check "cf.py refuses a write" "2 cf: dns-create writes: use cf-write.py" "$CODE $ERR"
+cfj '{"command": "dns-delete", "args": {"zone": "example.com", "record": "www"}}'
+check "cf.py refuses a write sent on stdin" "2 cf: dns-delete writes: use cf-write.py" "$CODE $ERR"
+reset
+check "a refused write sends nothing" "" "$(sent)"
+
+reset
+cfw dns-create example.com --type A --name new --content 203.0.113.5 --proxied
+check "dns-create prints the record" "created	A	new.example.com	203.0.113.5	yes	auto" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-6)"
+create_bk=$(backup_of)
+check "a write ends with its backup" "backup: $create_bk" "$(printf '%s\n' "$OUT" | tail -1)"
+check_contains "the backup lies under backup_dir/<account>/<zone>" "$WORK/backups/alpha/example.com/" "$create_bk"
+check "the backup is named <UTC timestamp>-<kind>.json" "1" \
+  "$(basename "$create_bk" | grep -cE '^[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-dns\.json$')"
+check "the backup is private" "600" "$(stat -f '%Lp' "$create_bk" 2>/dev/null || stat -c '%a' "$create_bk")"
+check "the backup of a create holds the name, without records" "new.example.com 0" \
+  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; print(" ".join(d["names"]), len(d["records"]))' "$create_bk")"
+check "dns-create posts once" "1" "$(sent | grep -c '^POST /zones/0123456789abcdef0123456789abcdef/dns_records$')"
+
+reset
+taken_before=$(ls "$WORK/backups/alpha/example.com" | wc -l)
+fail_next POST /dns_records 400 81053 "An A, AAAA, or CNAME record with that host already exists."
+cfw dns-create example.com --type A --name failed --content 203.0.113.6
+check "a refused create exits 3 with Cloudflare's reason" \
+  "3 cf: Cloudflare 81053: An A, AAAA, or CNAME record with that host already exists." "$CODE $ERR"
+check "the backup was taken before the call" "$((taken_before + 1))" "$(ls "$WORK/backups/alpha/example.com" | wc -l | tr -d ' ')"
+
+reset
+mkdir -p "$WORK/ro"
+chmod 500 "$WORK/ro"
+printf '{"default_account": "alpha", "backup_dir": "%s"}\n' "$WORK/ro/backups" > "$WORK/ro.json"
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/ro.json" cfw dns-delete example.com www
+check "a backup that cannot be written stops the write" "4" "$CODE"
+check_contains "a backup that cannot be written says nothing was changed" "nothing was changed" "$ERR"
+check "a write without its backup sends nothing" "" "$(sent | grep -v '^GET')"
+chmod 700 "$WORK/ro"
+
+reset
+cfw dns-update example.com app --type A --content 203.0.113.7
+check "dns-update changes a CNAME into an A, proxied kept" \
+  "$(printf 'before\tCNAME\tapp.example.com\twww.example.com\tyes\tauto\nafter\tA\tapp.example.com\t203.0.113.7\tyes\tauto')" \
+  "$(printf '%s\n' "$OUT" | head -2 | cut -f1-6)"
+check "dns-update keeps the record's id" "$(printf '%s\n' "$OUT" | sed -n 1p | cut -f7)" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f7)"
+update_bk=$(backup_of)
+check "the backup of an update holds the record before it" "CNAME www.example.com" \
+  "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["data"]["records"][0]; print(r["type"], r["content"])' "$update_bk")"
+check "dns-update overwrites the record" "1" "$(sent | grep -c '^PUT /zones/.*/dns_records/')"
+
+cfw dns-update example.com app
+check "dns-update with nothing to change exits 2" "2 cf: nothing to change: pass type, name, content, ttl, proxied, priority or comment" "$CODE $ERR"
+cfw dns-update example.com multi --content three
+check "dns-update of an ambiguous name exits 2" "2" "$CODE"
+check_contains "an ambiguous name lists the records to choose from" "TXT	multi.example.com	one" "$ERR"
+cfw dns-update example.com www --type TXT --content hello
+check "a type that cannot be proxied leaves the proxy" "after	TXT	www.example.com	hello	no" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1-5)"
+cfw dns-update example.com www --type A --content 203.0.113.10 --proxied --ttl 120
+cfw dns-update example.com multi --from-type TXT --content x
+check "--from-type alone does not settle two records of one type" "2" "$CODE"
+
+cfwj '{"command": "dns-update", "args": {"zone": "example.com", "record": "www", "proxied": false}}'
+check "stdin json maps proxied false to --no-proxied" "after	A	www.example.com	203.0.113.10	no	120" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1-6)"
+
+reset
+cfw dns-delete example.com www
+check "dns-delete prints the record it deleted" "deleted	A	www.example.com	203.0.113.10	yes	auto" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-6)"
+delete_bk=$(backup_of)
+check "dns-delete deletes once" "1" "$(sent | grep -c '^DELETE ')"
+cf dns-get example.com www
+check "the deleted record is gone" "2" "$CODE"
+
+echo "== backups and restore =="
+
+cf backups
+check "backups lists every backup, oldest first" "account	zone	taken	kind	path" "$(printf '%s\n' "$OUT" | head -1)"
+check "backups lists the writes made" "$delete_bk" "$(printf '%s\n' "$OUT" | tail -1 | cut -f5)"
+cf backups --zone example.net
+check "backups --zone filters" "" "$OUT"
+cf backups --json
+check "backups --json gives objects" "dns" \
+  "$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["kind"])')"
+
+cf restore "$delete_bk"
+check "cf.py refuses restore" "2 cf: restore writes: use cf-write.py" "$CODE $ERR"
+
+# Each restore below replays a write made after the same reset, on the same
+# records.
+reset
+cfw dns-update example.com app --type A --content 203.0.113.7
+cfw restore "$(backup_of)"
+check "restore turns an A back into the CNAME it was" "restored	CNAME	app.example.com	www.example.com	yes	auto" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-6)"
+check_contains "restore takes its own backup first" "backup: $WORK/backups/alpha/example.com/" "$(printf '%s\n' "$OUT" | tail -1)"
+
+cfw dns-create example.com --type A --name new --content 203.0.113.5 --proxied
+created_bk=$(backup_of)
+cfw restore "$created_bk"
+check "restore of a create's backup deletes the record created since" "deleted	A	new.example.com	203.0.113.5	yes	auto" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-6)"
+cfw restore "$created_bk"
+check "a restore with nothing to change writes nothing" "nothing to restore: new.example.com already matches the backup" "$OUT"
+
+cfw dns-delete example.com www
+cfw restore "$(backup_of)"
+check "restore recreates a deleted record" "recreated	A	www.example.com	203.0.113.10	yes	auto" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-6)"
+cf dns-get example.com www
+check "the restored record is back" "A	www.example.com	203.0.113.10	yes	auto" "$(lines)"
+
+printf '{}' > "$WORK/outside.json"
+cfw restore "$WORK/outside.json"
+check "restore refuses a file outside the backups" "2" "$CODE"
+cfw restore "$WORK/backups/alpha/example.com/none-dns.json"
+check "restore of a missing backup exits 2" "2" "$CODE"
+cfw restore "$delete_bk" --account beta
+check "restore refuses another account than the backup's" "2 cf: $delete_bk belongs to account alpha, not beta" "$CODE $ERR"
+
+echo "== end to end: a DNS cycle through the tool's requests =="
+
+reset
+cfj '{"command": "dns-list", "args": {"zone": "example.com", "name": "e2e"}}'
+check "e2e: the name is free" "0 " "$CODE $OUT"
+cfwj '{"command": "dns-create", "args": {"zone": "example.com", "type": "CNAME", "name": "e2e", "content": "www.example.com", "proxied": true}}'
+check "e2e: create a CNAME" "created	CNAME	e2e.example.com	www.example.com	yes" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+cfwj '{"command": "dns-update", "args": {"zone": "example.com", "record": "e2e", "type": "A", "content": "203.0.113.9"}}'
+check "e2e: change it into an A" "after	A	e2e.example.com	203.0.113.9	yes" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1-5)"
+e2e_update_bk=$(backup_of)
+cfwj '{"command": "dns-delete", "args": {"zone": "example.com", "record": "e2e"}}'
+check "e2e: delete it" "deleted	A	e2e.example.com	203.0.113.9	yes" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+e2e_delete_bk=$(backup_of)
+cfwj "{\"command\": \"restore\", \"args\": {\"path\": \"$e2e_delete_bk\"}}"
+check "e2e: restore it from the delete's backup" "recreated	A	e2e.example.com	203.0.113.9	yes" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+cfj '{"command": "dns-list", "args": {"zone": "example.com", "name": "e2e"}}'
+check "e2e: the A is back" "A	e2e.example.com	203.0.113.9	yes	auto" "$(lines)"
+# The record came back under a new id: the update's backup replaces it.
+cfwj "{\"command\": \"restore\", \"args\": {\"path\": \"$e2e_update_bk\"}}"
+check "e2e: the update's backup brings the CNAME back" \
+  "$(printf 'deleted\tA\te2e.example.com\t203.0.113.9\tyes\nrecreated\tCNAME\te2e.example.com\twww.example.com\tyes')" \
+  "$(printf '%s\n' "$OUT" | head -2 | cut -f1-5)"
+cfj '{"command": "dns-get", "args": {"zone": "example.com", "record": "e2e"}}'
+check "e2e: the name holds the CNAME alone" "CNAME	e2e.example.com	www.example.com	yes	auto" "$(lines)"
+
+echo "== tokens never leave =="
+
+reset
+fail_next GET /zones 400 9999 "bad header Bearer $TOKEN_ALPHA"
+cf zones
+check "a token echoed back by the API is masked" "cf: Cloudflare 9999: bad header Bearer [token]" "$ERR"
+
+check "no output of the engine holds a fixture token" "0" \
+  "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA" "$CAPTURED")"
+check "no backup holds a fixture token" "" \
+  "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA" "$WORK/backups" 2>/dev/null)"
+check "the engine prints no traceback" "0" "$(grep -c 'Traceback' "$CAPTURED")"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
