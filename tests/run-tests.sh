@@ -1650,6 +1650,37 @@ check "a systemd unit without EnvironmentFile= is a warning" \
   "warning: $CADDY/noenv.service has no EnvironmentFile=$ENVFILE: a restart of the service would run caddy without its variables" \
   "$(printf '%s\n' "$OUT" | grep '^warning:')"
 
+# service_state <manager> <service file>: caddy-status's service row, check and state.
+service_state() {
+  caddy_config "$WORK/caddy-svc.json" ", \"manager\": \"$1\", \"service\": \"$2\""
+  CCONF="$WORK/caddy-svc.json" cdy caddy-status
+  printf '%s\n' "$OUT" | grep '^service' | cut -f2
+}
+mkdir -p "$CADDY/reset.service.d"
+printf '[Service]\nEnvironmentFile=%s\n' "$ENVFILE" > "$CADDY/reset.service"
+printf '[Service]\nEnvironmentFile=\n' > "$CADDY/reset.service.d/override.conf"
+check "a drop-in's empty EnvironmentFile= resets the unit's" "no-envfile" "$(service_state systemd "$CADDY/reset.service")"
+printf '[Service]\nEnvironmentFile=\nEnvironmentFile=-"%s"\n' "$ENVFILE" > "$CADDY/reset.service.d/override.conf"
+check "…and one set after the reset counts, quoted and with its - prefix" "ok" "$(service_state systemd "$CADDY/reset.service")"
+printf '[Service]\nEnvironmentFile="%s"\n' "$ENVFILE" > "$CADDY/quoted.service"
+check "a quoted EnvironmentFile= path counts" "ok" "$(service_state systemd "$CADDY/quoted.service")"
+printf "[Service]\nEnvironmentFile='%s'\n" "$ENVFILE" > "$CADDY/single.service"
+check "…single-quoted too" "ok" "$(service_state systemd "$CADDY/single.service")"
+printf '[Service]\nEnvironmentFile=-%s\n' "$ENVFILE" > "$CADDY/dash.service"
+check "a - prefixed EnvironmentFile= counts" "ok" "$(service_state systemd "$CADDY/dash.service")"
+python3 - "$CADDY/sh.plist" "$ENVFILE" <<'PYSH'
+import plistlib, sys
+with open(sys.argv[1], "wb") as fh:
+    plistlib.dump({"Label": "caddy", "ProgramArguments": ["/bin/sh", "-c", "exec caddy run --config /srv/Caddyfile --envfile '%s'" % sys.argv[2]]}, fh)
+PYSH
+check "a launchd service running sh -c \"caddy run --envfile x\" counts" "ok" "$(service_state launchd "$CADDY/sh.plist")"
+python3 - "$CADDY/eq.plist" "$ENVFILE" <<'PYEQ'
+import plistlib, sys
+with open(sys.argv[1], "wb") as fh:
+    plistlib.dump({"Label": "caddy", "ProgramArguments": ["caddy", "run", "--envfile=" + sys.argv[2]]}, fh)
+PYEQ
+check "a launchd service with --envfile=PATH counts" "ok" "$(service_state launchd "$CADDY/eq.plist")"
+
 chmod 644 "$ENVFILE"
 cdy caddy-status
 check "an envfile others can read is a warning" "warning: $ENVFILE is readable by others (mode 644): chmod 600 it" \

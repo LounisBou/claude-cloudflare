@@ -20,6 +20,7 @@ import fcntl
 import os
 import plistlib
 import re
+import shlex
 import signal
 import socket
 import ssl
@@ -425,27 +426,54 @@ def _same(a, b):
 
 
 def _launchd_envfile(path):
+    """The --envfile of the plist's ProgramArguments, an argument that is a
+    whole command line (sh -c "caddy run --envfile x") read word by word."""
     with open(path, "rb") as fh:
         args = plistlib.load(fh).get("ProgramArguments") or []
-    for k, arg in enumerate(args):
-        if arg == "--envfile" and k + 1 < len(args):
-            yield args[k + 1]
-        elif isinstance(arg, str) and arg.startswith("--envfile="):
-            yield arg[len("--envfile="):]
+    words = []
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        try:
+            words += shlex.split(arg) if any(c.isspace() for c in arg) else [arg]
+        except ValueError:
+            words.append(arg)
+    found = []
+    for k, word in enumerate(words):
+        if word == "--envfile" and k + 1 < len(words):
+            found.append(words[k + 1])
+        elif word.startswith("--envfile="):
+            found.append(word[len("--envfile="):])
+    return found
+
+
+def _unquote(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
 
 
 def _systemd_envfile(path):
-    """EnvironmentFile= of the unit and of its drop-ins beside it (<unit>.d/*.conf)."""
+    """EnvironmentFile= of the unit and of its drop-ins beside it
+    (<unit>.d/*.conf), in systemd's order: an empty one resets the list, a
+    "-" prefix (a file that may be missing) and quotes are not the path."""
     files = [path]
     dropins = path + ".d"
     if os.path.isdir(dropins):
         files += [os.path.join(dropins, n) for n in sorted(os.listdir(dropins)) if n.endswith(".conf")]
+    found = []
     for name in files:
         with open(name, encoding="utf-8") as fh:
             for line in fh:
                 key, sep, value = line.strip().partition("=")
-                if sep and key.strip() == "EnvironmentFile":
-                    yield value.strip().lstrip("-")
+                if not sep or key.strip() != "EnvironmentFile":
+                    continue
+                value = value.strip()
+                if not value:
+                    found = []
+                    continue
+                found.append(_unquote(_unquote(value).lstrip("-")).lstrip("-"))
+    return found
 
 
 def service(settings):
