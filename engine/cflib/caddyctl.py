@@ -15,6 +15,7 @@ import datetime
 import os
 import plistlib
 import re
+import signal
 import socket
 import ssl
 import subprocess
@@ -154,19 +155,26 @@ class Settings:
         env = dict(os.environ)
         env.update(variables)
         try:
-            done = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, timeout=CALL_TIMEOUT)
+            # A session of its own: on a timeout, everything it started is killed with it.
+            proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, start_new_session=True)
         except OSError as exc:
             # A failure like any other: after an edit, the cycle puts the copy back.
             return False, "cannot run %s: %s" % (argv[0], exc.strerror)
+        try:
+            out, err = proc.communicate(timeout=CALL_TIMEOUT)
         except subprocess.TimeoutExpired:
+            _kill(proc)
             return False, "caddy %s did not end within %d seconds" % (args[0], CALL_TIMEOUT)
+        except BaseException:
+            _kill(proc)
+            raise
         hidden = masked(variables)
-        if done.returncode == 0:
-            return True, redact(done.stdout.decode("utf-8", "replace").strip(), hidden)
+        if proc.returncode == 0:
+            return True, redact(out.decode("utf-8", "replace").strip(), hidden)
         # Masked before error_line cuts it: a value cut in two would no longer be found.
-        return False, error_line(redact(done.stderr.decode("utf-8", "replace") + "\n"
-                                        + done.stdout.decode("utf-8", "replace"), hidden), args[0], done.returncode)
+        return False, error_line(redact(err.decode("utf-8", "replace") + "\n"
+                                        + out.decode("utf-8", "replace"), hidden), args[0], proc.returncode)
 
     def validate(self, variables):
         return self.call(["validate", "--config", self.caddyfile, "--adapter", "caddyfile"], variables)
@@ -187,6 +195,22 @@ class Settings:
                 return resp.status == 200
         except (urllib.error.URLError, OSError, ValueError):
             return False
+
+
+def _kill(proc):
+    """The process group of a run, killed and reaped; what refuses the signal
+    (a process of root's under sudo) is left, without waiting on it long."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def error_line(output, command, code):

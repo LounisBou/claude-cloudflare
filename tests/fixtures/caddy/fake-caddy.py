@@ -6,7 +6,9 @@ so the suite can tell what reached the argument vector and what reached the
 environment. What validate and reload do is queued by the suite, one line per
 call, in the files "validate" and "reload" of the same directory:
 
-    validate: "fail <message>" fails with "Error: <message>"; anything else passes.
+    validate: "fail <message>" fails with "Error: <message>"; "hang" starts a
+              child (its pid and the fake's in "hung.pids") and both sleep a
+              minute; anything else passes.
     reload:   "fail <message>" fails the same way; a JSON object is an effect
               applied to the world after the reload: {"down": [hosts]} stops
               answering for those hosts, {"status": {host: code}} changes their
@@ -20,7 +22,9 @@ the first column. world.py reads world.json, which a reload rewrites.
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 
 STATE = os.environ["FAKE_CADDY_STATE"]
 _SITE = re.compile(r"^(?!\(|\{|:|\*|#|http://)(\S[^{]*?)\s*\{\s*$")
@@ -72,6 +76,11 @@ def main(argv):
         step = pop("validate")
         if step.startswith("fail "):
             fail(step)
+        if step == "hang":
+            child = subprocess.Popen(["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(os.path.join(STATE, "hung.pids"), "w", encoding="utf-8") as fh:
+                fh.write("%d %d\n" % (os.getpid(), child.pid))
+            time.sleep(60)
         print("Valid configuration")
         return 0
     if command == "reload":

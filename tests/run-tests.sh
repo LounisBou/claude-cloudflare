@@ -1545,7 +1545,7 @@ cdywj() { EXTRA_ENV="$(caddy_env)" cfwj "$1"; }
 # copy, no call recorded, nothing queued for the fake binary.
 caddy_reset() {
   cp "$FIXTURES/caddy/Caddyfile" "$CADDYFILE"
-  rm -f "$CADDYFILE".bak-* "$CSTATE/validate" "$CSTATE/reload" "$CSTATE/calls.jsonl" "$CSTATE/sudo.log"
+  rm -f "$CADDYFILE".bak-* "$CSTATE/validate" "$CSTATE/reload" "$CSTATE/calls.jsonl" "$CSTATE/sudo.log" "$CSTATE/hung.pids"
   printf '{"alive": true, "sites": {"app.example.com": 200, "www.example.com": 200, "a.example.com": 200, "b.example.com": 200}}\n' > "$CSTATE/world.json"
 }
 # calls: the fake binary's commands since the last reset, space-separated.
@@ -1556,6 +1556,29 @@ calls() {
 # copies: how many copies of the Caddyfile lie beside it.
 copies() { ls "$CADDYFILE".bak-* 2>/dev/null | wc -l | tr -d ' '; }
 same() { cmp -s "$1" "$2" && echo same || echo differs; }
+# inject <python> <command> [args...]: cf-write.py's main after the Python
+# (a patch of the engine) has run, in cdyw's environment; OUT, ERR and CODE
+# as run sets them. What it prints is not kept: a patch may raise on purpose.
+inject() {
+  local patch="$1"
+  shift
+  env -i PATH="$PATH" HOME="$HOMEDIR" CF_API_BASE="$API" $(caddy_env) \
+    python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import cf; from cflib import caddy, caddyctl; exec(sys.argv[2]); sys.exit(cf.main(sys.argv[3:], writes=True))' \
+    "$ENGINE" "$patch" "$@" >"$WORK/out" 2>"$WORK/err"
+  CODE=$?
+  OUT=$(cat "$WORK/out")
+  ERR=$(cat "$WORK/err")
+}
+# alive <pid...>: those of the pids still running, each followed by a space.
+alive() {
+  for _ in $(seq 1 20); do
+    left=""
+    for pid in "$@"; do kill -0 "$pid" 2>/dev/null && left="$left$pid "; done
+    [ -z "$left" ] && break
+    sleep 0.1
+  done
+  printf '%s' "$left"
+}
 BODY="$FIXTURES/caddy/body-proxy.caddy"
 ORIGINAL="$FIXTURES/caddy/Caddyfile"
 
@@ -1895,6 +1918,13 @@ check "with sudo: true the cycle runs" "0" "$CODE"
 check "…every caddy call goes through sudo -n, keeping the envfile's names, never its values" \
   "$(printf -- '-n --preserve-env=CF_API_TOKEN,LOG %s validate --config %s --adapter caddyfile\n-n --preserve-env=CF_API_TOKEN,LOG %s reload --config %s --adapter caddyfile --address 127.0.0.1:%s' "$FAKE_CADDY" "$CADDYFILE" "$FAKE_CADDY" "$CADDYFILE" "$ADMIN_PORT")" \
   "$(cat "$CSTATE/sudo.log")"
+
+caddy_reset
+printf 'hang\n' > "$CSTATE/validate"
+inject 'caddyctl.CALL_TIMEOUT = 1' caddy-site-set new.example.com --body-file "$BODY"
+check "a caddy run past its time exits 6, the Caddyfile restored" "6 same" "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…saying it did not end in time" "cf: caddy validate failed: caddy validate did not end within 1 seconds" "$ERR"
+check "…and the run is killed with every process it started" "" "$(alive $(cat "$CSTATE/hung.pids"))"
 
 check "no stop, restart or service command anywhere in the engine" "" \
   "$(grep -rnE 'brew services|systemctl (re)?start|systemctl stop|launchctl|caddy stop|"stop"|"restart"' "$ENGINE" 2>/dev/null)"
