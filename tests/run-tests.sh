@@ -344,9 +344,17 @@ reset
 taken_before=$(ls "$WORK/backups/alpha/example.com" | wc -l)
 fail_next POST /dns_records 400 81053 "An A, AAAA, or CNAME record with that host already exists."
 cfw dns-create example.com --type A --name failed --content 203.0.113.6
-check "a refused create exits 3 with Cloudflare's reason" \
-  "3 cf: Cloudflare 81053: An A, AAAA, or CNAME record with that host already exists." "$CODE $ERR"
+newest_bk() { printf '%s/%s' "$WORK/backups/alpha/example.com" "$(ls "$WORK/backups/alpha/example.com" | tail -1)"; }
+check "a refused create exits 3 with Cloudflare's reason and its backup" \
+  "3 cf: Cloudflare 81053: An A, AAAA, or CNAME record with that host already exists.; backup: $(newest_bk)" "$CODE $ERR"
 check "the backup was taken before the call" "$((taken_before + 1))" "$(ls "$WORK/backups/alpha/example.com" | wc -l | tr -d ' ')"
+record_id() { cf dns-get example.com "$1"; printf '%s\n' "$OUT" | sed -n 2p | cut -f6; }
+fail_next PUT "/dns_records/$(record_id app)" 400 9005 "DNS record content is invalid"
+cfw dns-update example.com app --content www.example.net
+check "a failed update names its backup" "3 cf: Cloudflare 9005: DNS record content is invalid; backup: $(newest_bk)" "$CODE $ERR"
+fail_next DELETE "/dns_records/$(record_id app)" 500 10001 "Internal error"
+cfw dns-delete example.com app
+check "a failed delete names its backup" "3 cf: Cloudflare 10001: Internal error; backup: $(newest_bk)" "$CODE $ERR"
 
 reset
 mkdir -p "$WORK/ro"
@@ -438,6 +446,28 @@ cfw restore "$WORK/backups/alpha/example.com/none-dns.json"
 check "restore of a missing backup exits 2" "2" "$CODE"
 cfw restore "$delete_bk" --account beta
 check "restore refuses another account than the backup's" "2 cf: $delete_bk belongs to account alpha, not beta" "$CODE $ERR"
+
+# A restore cut between its delete and its re-create names the backup it took
+# of the state it was replacing, from which that state comes back. The A
+# brought back by the delete's backup has a new id, so the update's backup
+# deletes it before it creates the CNAME again.
+reset
+cfw dns-update example.com app --type A --content 203.0.113.7
+cname_bk=$(backup_of)
+cfw dns-delete example.com app
+cfw restore "$(backup_of)"
+fail_next POST /dns_records 500 10001 "Internal error"
+cfw restore "$cname_bk"
+cut_bk=$(printf '%s' "$ERR" | sed -n 's/.*; backup: //p')
+check "an interrupted restore names its own backup" "3 cf: Cloudflare 10001: Internal error; backup: $(newest_bk)" "$CODE $ERR"
+check "the interrupted restore deleted the A before it failed" "2" "$(cf dns-get example.com app; printf '%s' "$CODE")"
+cfw restore "$cut_bk"
+check "the interrupted restore's backup brings the A back" "recreated	A	app.example.com	203.0.113.7	yes" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-5)"
+cfw dns-update example.com app --content 203.0.113.8
+moved_bk=$(backup_of)
+fail_next PUT "/dns_records/$(record_id app)" 500 10001 "Internal error"
+cfw restore "$moved_bk"
+check "a failed restore names its backup" "3 cf: Cloudflare 10001: Internal error; backup: $(newest_bk)" "$CODE $ERR"
 
 echo "== end to end: a DNS cycle through the tool's requests =="
 

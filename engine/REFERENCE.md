@@ -26,7 +26,9 @@ for reads, `python3 cf-write.py [--account NAME] <command> ...` for writes.
 
 Compact text: a header line, then one line per object, tab-separated. `--json`
 on any read prints the full objects instead. A write prints what it did and
-ends with `backup: <path>`. Errors are one line, `cf: <message>`, on stderr.
+ends with `backup: <path>`; a write whose call fails once its backup is taken
+ends its error with `; backup: <path>`. Errors are one line, `cf: <message>`,
+on stderr.
 
 | Exit | Meaning |
 |---|---|

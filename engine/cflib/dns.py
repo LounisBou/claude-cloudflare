@@ -6,6 +6,7 @@ records of the names it touches first, and restore() replays such a backup.
 """
 
 import argparse
+import contextlib
 import re
 
 from . import backup, errors, fmt, zones
@@ -96,6 +97,16 @@ def save(ctx, zone, names):
     return ctx.backup.save(ctx.account, zone["name"], "dns", data)
 
 
+@contextlib.contextmanager
+def backed_by(path):
+    """A call that fails after its backup was taken names that backup, from
+    which the state it started from comes back."""
+    try:
+        yield
+    except errors.ApiError as exc:
+        raise errors.ApiError("%s; backup: %s" % (exc.message, path)) from None
+
+
 # ---- reads ----
 
 def dns_list(args, ctx):
@@ -142,7 +153,8 @@ def dns_create(args, ctx):
     record = dict(_changes(args), name=fqdn(zone["name"], args.name))
     record.setdefault("ttl", 1)
     path = save(ctx, zone, [record["name"]])
-    created = ctx.api.post(_records_path(zone), body(record))
+    with backed_by(path):
+        created = ctx.api.post(_records_path(zone), body(record))
     return "%s\nbackup: %s" % (line("created", created), path)
 
 
@@ -156,7 +168,8 @@ def dns_update(args, ctx):
     current = one(ctx, zone, args.record, args.from_type)
     record = dict(current, **changes)
     path = save(ctx, zone, [current["name"], record["name"]])
-    updated = ctx.api.put(_records_path(zone) + "/" + current["id"], body(record))
+    with backed_by(path):
+        updated = ctx.api.put(_records_path(zone) + "/" + current["id"], body(record))
     return "%s\n%s\nbackup: %s" % (line("before", current), line("after", updated), path)
 
 
@@ -164,7 +177,8 @@ def dns_delete(args, ctx):
     zone = zones.find(ctx, args.zone)
     current = one(ctx, zone, args.record, args.type)
     path = save(ctx, zone, [current["name"]])
-    ctx.api.delete(_records_path(zone) + "/" + current["id"])
+    with backed_by(path):
+        ctx.api.delete(_records_path(zone) + "/" + current["id"])
     return "%s\nbackup: %s" % (line("deleted", current), path)
 
 
@@ -190,13 +204,14 @@ def restore(ctx, saved):
     path = save(ctx, zone, names)
     lines = []
     # Deletions first: a CNAME cannot share its name with the records it replaces.
-    for record in deletes:
-        ctx.api.delete(_records_path(zone) + "/" + record["id"])
-        lines.append(line("deleted", record))
-    for record in puts:
-        lines.append(line("restored", ctx.api.put(_records_path(zone) + "/" + record["id"], body(record))))
-    for record in posts:
-        lines.append(line("recreated", ctx.api.post(_records_path(zone), body(record))))
+    with backed_by(path):
+        for record in deletes:
+            ctx.api.delete(_records_path(zone) + "/" + record["id"])
+            lines.append(line("deleted", record))
+        for record in puts:
+            lines.append(line("restored", ctx.api.put(_records_path(zone) + "/" + record["id"], body(record))))
+        for record in posts:
+            lines.append(line("recreated", ctx.api.post(_records_path(zone), body(record))))
     return lines + ["backup: " + path]
 
 
