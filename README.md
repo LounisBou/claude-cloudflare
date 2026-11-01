@@ -13,7 +13,10 @@ from Bash.
 Install the `cloudflare` plugin from its marketplace, then run
 `/cloudflare:install`. The plugin needs python3 3.9 or later and one API token
 per Cloudflare account; `/cloudflare:doctor` checks python3, the config file,
-the accounts found and each account's token, and never prints a token.
+the accounts found and each account's token, says which families of commands
+each token cannot read or write, and, with a `caddy` section, that the caddy
+binary runs, that its service starts it with the envfile and that the envfile
+holds the variable the TLS snippet reads. It never prints a token.
 
 ## Accounts by name
 
@@ -30,7 +33,8 @@ key is optional:
 {
   "default_account": "alpha",
   "env_files": ["~/.env"],
-  "backup_dir": "~/.local/share/claude-cloudflare/backups"
+  "backup_dir": "~/.local/share/claude-cloudflare/backups",
+  "default_target": "203.0.113.10"
 }
 ```
 
@@ -44,8 +48,9 @@ A token the API echoes back is masked.
 
 - reads: `auth-check`, `accounts`, `zones`, `dns-list`, `dns-get`,
   `dns-export`, `backups`, `settings`, `certs`, `plan`, `rules`, `ip-rules`,
-  `security`, `cache-rules`, `workers`, `worker-routes`, `caddy-sites`,
-  `caddy-site`, `caddy-status`, `caddy-docs`;
+  `security`, `cache-rules`, `workers`, `worker-routes`, `worker-domains`,
+  `caddy-sites`, `caddy-site`, `caddy-status`, `caddy-docs`, `check`,
+  `inventory`;
 - writes: `dns-create`, `dns-update` (type change included), `dns-delete`,
   `restore`, `setting-set`, `universal-ssl`, `rule-add`, `rule-update`,
   `rule-delete`, `block-countries`, `allow-only-countries`, `rate-limit`,
@@ -53,7 +58,8 @@ A token the API echoes back is masked.
   `bot-fight`, `security-level`, `under-attack`, `cache-rule-add`,
   `cache-rule-delete`, `purge`, `purge-all`, `worker-deploy`, `worker-delete`,
   `worker-route-add`, `worker-route-delete`, `worker-domain-add`,
-  `caddy-site-set`, `caddy-site-remove`, `caddy-reload`.
+  `worker-domain-delete`, `caddy-site-set`, `caddy-site-remove`, `caddy-reload`, `publish`,
+  `unpublish`.
 
 Output is compact text, one line per object; `"json": true` on a read gives
 the full objects. `engine/REFERENCE.md` lists every command, its arguments and
@@ -102,8 +108,10 @@ plan's quota is checked first. `purge` takes URLs, hosts, prefixes or tags;
 `worker-deploy hello --file hello.js` uploads an ES module (the script's
 content is saved first when it replaces one), `worker-delete` saves the
 content before deleting, `worker-route-add` / `worker-route-delete` manage a
-zone's routes and `worker-domain-add` attaches a hostname to a script.
-`restore` puts back cache rules, a deleted script and deleted routes.
+zone's routes, `worker-domains` lists the custom domains, `worker-domain-add`
+attaches a hostname to a script and `worker-domain-delete` detaches it, saved
+first. `restore` puts back cache rules, a deleted script, deleted routes and a
+detached domain.
 
 ## Caddy
 
@@ -163,6 +171,37 @@ are edited by hand.
 validate`, the envfile, and that the service (launchd `--envfile`, systemd
 `EnvironmentFile=`) loads the envfile. `caddy-docs` prints short digests of
 caddyserver.com/docs, one per directive family (`docs/caddy/`).
+
+## Publish, check and inventory
+
+`publish app.example.com --to 8080` puts a service on line in one command, and
+one permission ask: the `A` record (proxied, on the config's `default_target`
+unless `--ip` names another address; `--no-proxy` for DNS only), then the site
+block through the Caddy cycle, then a `check` of the host:
+
+```
+https://app.example.com {
+	import tls_config
+	log
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+`--extra-file` adds directives after `reverse_proxy` (never an `import`, nor a
+placeholder that reads the environment or a file); the permission ask shows
+its size and digest, not its text. A proxied publish is refused, before
+anything is written, when the zone's Universal SSL is off or its SSL mode is
+not `full` or `strict`; a name with a `CNAME` or an `AAAA` is refused too. If the Caddy cycle fails after the
+record was written, the record is put back from its backup, and the error
+names every backup. `unpublish` removes the block, then the record.
+
+`check app.example.com` resolves the name through `1.1.1.1` and requests it
+over HTTPS on the address it resolves to: one line with the address, the HTTP
+status, the certificate's issuer and its expiry. `inventory example.com`
+backs the zone up (a file written), prints its SSL settings, then one line per
+host with its record, its Caddy block and its check, within one deadline, and
+lists the records without a block and the blocks without a record. Both reach
+outside the account: a public resolver, and each host itself.
 
 ## Backups and restore
 

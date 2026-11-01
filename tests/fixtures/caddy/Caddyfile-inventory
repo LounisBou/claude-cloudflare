@@ -1,0 +1,29 @@
+{
+	admin localhost:2019
+}
+
+(tls_config) {
+	tls {
+		dns cloudflare {$CF_API_TOKEN}
+	}
+}
+
+www.example.com {
+	import tls_config
+	reverse_proxy 127.0.0.1:8080
+}
+
+https://app.example.com {
+	import tls_config
+	reverse_proxy 127.0.0.1:8081
+}
+
+# A block whose name has no DNS record
+https://orphan.example.com {
+	import tls_config
+	respond "no record"
+}
+
+https://other.example.net {
+	respond "another zone"
+}

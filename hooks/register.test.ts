@@ -295,6 +295,182 @@ test('caddy-site-remove and caddy-reload are writes, the Caddy reads are not ask
   expect(runs.length).toBe(6)
 })
 
+test('publish is one ask for its whole cycle, on the account and the local Caddy, its host shown first', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  stubAsk(on, asked, 'Allow')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  const out = await call($, 'publish', { 'extra-file': '/work/' + 'e'.repeat(300) + '.caddy', host: 'new.example.com', to: '8080' }, 'alpha')
+  expect(out).toEqual({ result: 'ok' })
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('Run cf publish on account alpha and the local Caddy for new.example.com with ')
+  expect(runs.length).toBe(1)
+  expect(runs[0].argv[1].endsWith('/engine/cf-write.py')).toBe(true)
+  expect(runs[0].command).toBe('publish')
+})
+
+// The extra file the publish ask reads: its bytes, never shown as text.
+const EXTRA = 'header X-Long ' + 'v'.repeat(600) + '\n'
+
+test('the publish ask names host, target, address and proxy first, then the overwrite, then the extra file by size and digest', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  const read: any[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  on('fs.read', (_$: any, e: any) => {
+    read.push(e)
+    return { value: { base64: btoa(EXTRA) } }
+  })
+  stubAsk(on, asked, 'Allow')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'publish', { 'extra-file': '/work/extra.caddy', host: 'new.example.com', to: '8080', 'no-proxy': true, ip: '203.0.113.5' }, 'alpha')
+  await call($, 'publish', { host: 'two.example.com', to: 'http://127.0.0.1:9000' }, 'alpha')
+  expect(asked[0]).toContain(
+    'Run cf publish on account alpha and the local Caddy for new.example.com with --to 8080, --ip 203.0.113.5, '
+    + 'DNS only (--no-proxy). It may overwrite an existing DNS record of new.example.com and its existing site block. '
+    + '--extra-file /work/extra.caddy: 615 bytes, sha256 d90cda62039d?',
+  )
+  expect(asked[0]).not.toContain('vvvv')
+  expect(read).toEqual([{ path: '/work/extra.caddy', as: 'bytes' }])
+  expect(asked[1]).toContain(
+    'for two.example.com with --to http://127.0.0.1:9000, --ip the default_target of the config, proxied. It may overwrite',
+  )
+  expect(runs.length).toBe(2)
+})
+
+test('the publish ask keeps host and target whole past a long extra file, and a Deny runs nothing', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  on('fs.read', () => ({ value: { base64: btoa(EXTRA.repeat(50)) } }))
+  stubAsk(on, asked, 'Deny')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  const out: any = await call($, 'publish', { 'extra-file': '/work/' + 'e'.repeat(300) + '.caddy', host: 'new.example.com', to: '8080' }, 'alpha')
+  expect(asked[0]).toContain('for new.example.com with --to 8080, --ip the default_target of the config, proxied.')
+  expect(asked[0]).toContain(': 30750 bytes, sha256 ')
+  expect(asked[0]).not.toContain('header X-Long')
+  expect(JSON.stringify(out)).toContain('the user refused cf publish')
+  expect(runs.length).toBe(0)
+})
+
+test('the publish ask says when the extra file cannot be read', async ($, on) => {
+  const asked: string[] = []
+  await stubMod(on, [], undefined, { decision: 'ask' })
+  on('fs.read', () => ({ deny: 'ENOENT' }))
+  stubAsk(on, asked, 'Deny')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'publish', { 'extra-file': '/work/absent.caddy', host: 'new.example.com', to: '8080' })
+  expect(asked[0]).toContain('--extra-file /work/absent.caddy: cannot be read, publish will refuse it?')
+})
+
+test('the unpublish ask says every A, AAAA and CNAME record of the host goes', async ($, on) => {
+  const asked: string[] = []
+  await stubMod(on, [], undefined, { decision: 'ask' })
+  stubAsk(on, asked, 'Allow')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'unpublish', { host: 'old.example.com' })
+  expect(asked[0]).toContain(
+    'for old.example.com with {"host":"old.example.com"}. It removes the site block of old.example.com and deletes every A, AAAA and CNAME record of old.example.com?',
+  )
+})
+
+test('a publish grant covers later publishes on that account only', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  let first = true
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$: any, e: any) => {
+    const question = e.questions[0].question
+    asked.push(question)
+    const answer = first ? 'Allow for this session' : 'Deny'
+    first = false
+    return { result: { questions: e.questions, answers: { [question]: answer } } }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'publish', { host: 'a.example.com', to: '8080' }, 'alpha')
+  await call($, 'publish', { host: 'b.example.com', to: '8081' }, 'alpha')
+  await call($, 'publish', { host: 'c.example.com', to: '8082' }, 'beta')
+  expect(asked.length).toBe(2)
+  expect(asked[0]).toContain('every later cf publish on account alpha and the local Caddy until')
+  expect(runs.length).toBe(2)
+})
+
+test('a publish grant does not cover unpublish', async ($, on) => {
+  const runs: any[] = []
+  const options: string[][] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  let first = true
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$: any, e: any) => {
+    const q = e.questions[0]
+    options.push(q.options.map((o: any) => o.label))
+    const answer = first ? 'Allow for this session' : 'Deny'
+    first = false
+    return { result: { questions: e.questions, answers: { [q.question]: answer } } }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'publish', { host: 'a.example.com', to: '8080' }, 'alpha')
+  const out: any = await call($, 'unpublish', { host: 'a.example.com' }, 'alpha')
+  expect(options).toEqual([['Allow', 'Allow for this session', 'Deny'], ['Allow', 'Deny']])
+  expect(JSON.stringify(out)).toContain('the user refused cf unpublish')
+  expect(runs.map((r) => r.command)).toEqual(['publish'])
+})
+
+test('unpublish is asked every time, Allow and Deny only, its host shown', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  const options: string[][] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$: any, e: any) => {
+    const q = e.questions[0]
+    asked.push(q.question)
+    options.push(q.options.map((o: any) => o.label))
+    return { result: { questions: e.questions, answers: { [q.question]: 'Allow' } } }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'unpublish', { host: 'old.example.com' })
+  await call($, 'unpublish', { host: 'old.example.com' })
+  expect(options).toEqual([['Allow', 'Deny'], ['Allow', 'Deny']])
+  expect(asked[0]).toContain('Run cf unpublish on the default account and the local Caddy for old.example.com with ')
+  expect(runs.length).toBe(2)
+})
+
+test('worker-domains is a read, never asked; worker-domain-delete a write, asked', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  stubAsk(on, asked, 'Allow')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'worker-domains', { zone: 'example.com' })
+  expect(asked.length).toBe(0)
+  await call($, 'worker-domain-delete', { hostname: 'edge.example.com' }, 'alpha')
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('Run cf worker-domain-delete on account alpha with {"hostname":"edge.example.com"}')
+  expect(runs.map((r) => r.argv[1].split('/').pop())).toEqual(['cf.py', 'cf-write.py'])
+})
+
+test('check and inventory are reads, never asked', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  stubAsk(on, asked, 'Deny')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'check', { host: 'app.example.com' })
+  await call($, 'inventory', { zone: 'example.com' })
+  expect(asked.length).toBe(0)
+  expect(runs.map((r) => r.argv[1].split('/').pop())).toEqual(['cf.py', 'cf.py'])
+})
+
 // ---- « Allow for this session » ----
 
 test('« Allow for this session » runs the call and every later one of that command on that account', async ($, on) => {
@@ -474,6 +650,19 @@ test('/cloudflare:doctor runs install.sh and names its exit code, with no model 
   expect(runs[0][1].endsWith('/install.sh')).toBe(true)
   expect(runs[0].slice(2)).toEqual(['--check'])
   expect(runs[1].slice(2)).toEqual([])
+})
+
+test('/cloudflare:doctor names exit 15, the local Caddy not ready', async ($, on) => {
+  on('session.start', () => ({ cwd: '/work' }))
+  on('tool.register', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 15, stdout: 'cloudflare: account alpha: active\n', stderr: 'cloudflare: caddy: error: no envfile\n' } }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  const out: any = await $.command.run({ command: 'cloudflare:doctor', args: '' })
+  expect(out.text).toBe(
+    'cloudflare: account alpha: active\ncloudflare: caddy: error: no envfile\n\n'
+    + 'Exit code 15: the local Caddy is not ready: fix what is named, then run /cloudflare:doctor.',
+  )
 })
 
 test('/cloudflare:doctor falls back to the markdown command when the script cannot run', async ($, on) => {

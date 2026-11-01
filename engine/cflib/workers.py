@@ -5,9 +5,9 @@ main module, and the module itself). An upload over a script keeps its
 bindings, its secrets among them, and its compatibility flags. What a write is
 about to overwrite or delete is saved first: a script's main module, its name
 and content, under the "workers" directory of the account's backups, a zone's
-routes under the zone's; a script whose content is more than its main module
-cannot be saved whole, and is not overwritten or deleted. restore replays
-both. Workers KV, R2, secrets and bindings are not managed here.
+routes and a custom domain under the zone's; a script whose content is more
+than its main module cannot be saved whole, and is not overwritten or deleted.
+restore replays each. Workers KV, R2, secrets and bindings are not managed here.
 """
 
 import datetime
@@ -263,6 +263,32 @@ def restore_routes(ctx, saved):
 
 # ---- custom domains ----
 
+def _domains_path(ctx):
+    return "%s/domains" % _base(ctx)
+
+
+def _domain_line(verb, domain):
+    return "%s\t%s\t%s\t%s" % (verb, domain.get("hostname"), domain.get("service"), domain.get("zone_name") or "-")
+
+
+def _save_domain(ctx, domain):
+    return ctx.backup.save(ctx.account, domain.get("zone_name") or BACKUP_DIR, "worker-domain",
+                           {"account_id": accounts.account_id(ctx), "domain": domain})
+
+
+def _domain(ctx, path, hostname):
+    return next((d for d in ctx.api.get(path, params={"hostname": hostname}) or [] if d.get("hostname") == hostname),
+                None)
+
+
+def worker_domains(args, ctx):
+    params = {"zone_id": zones.find(ctx, args.zone)["id"]} if args.zone else None
+    found = ctx.api.get(_domains_path(ctx), params=params) or []
+    if args.json:
+        return fmt.as_json(found)
+    return fmt.table(found, ["id", "hostname", "service", "zone_name"])
+
+
 def worker_domain_add(args, ctx):
     zone, _ = protect.resolve(ctx, args.hostname)
     hostname = args.hostname.strip().lower().rstrip(".")
@@ -277,6 +303,31 @@ def worker_domain_add(args, ctx):
             quotas.refuse(zone, "%s is already attached to the Worker %s" % (hostname, have.get("service")))
     ctx.api.put(path, {"hostname": hostname, "service": args.script, "zone_id": zone["id"], "zone_name": zone["name"]})
     return "attached\t%s\t%s" % (hostname, args.script)
+
+
+def worker_domain_delete(args, ctx):
+    hostname = args.hostname.strip().lower().rstrip(".")
+    current = _domain(ctx, _domains_path(ctx), hostname)
+    if current is None:
+        raise errors.UsageError("no custom domain %s on account %s" % (hostname, ctx.account.name))
+    path = _save_domain(ctx, current)
+    guard.after_backup(path, ctx.api.delete, "%s/%s" % (_domains_path(ctx), current["id"]))
+    return "%s\nbackup: %s" % (_domain_line("deleted", current), path)
+
+
+@backup.restorer("worker-domain")
+def restore_domain(ctx, saved):
+    """Attach the saved hostname to its script again; no line when it already
+    is. An attachment it has taken since is saved first."""
+    domain = saved["data"]["domain"]
+    path = "/accounts/%s/workers/domains" % saved["data"]["account_id"]
+    current = _domain(ctx, path, domain["hostname"])
+    if current and current.get("service") == domain.get("service"):
+        return []
+    lines = ["backup: " + _save_domain(ctx, current)] if current else []
+    body = {key: domain[key] for key in ("hostname", "service", "zone_id", "zone_name", "environment") if domain.get(key)}
+    ctx.api.put(path, body)
+    return [_domain_line("restored", domain)] + lines
 
 
 def register(subparsers):
@@ -308,7 +359,15 @@ def register(subparsers):
     parser.add_argument("route", help="route id or pattern, as worker-routes prints them")
     parser.set_defaults(handler=worker_route_delete)
 
+    parser = subparsers.add_parser("worker-domains", help="the custom domains of the account, or of a zone")
+    parser.add_argument("zone", nargs="?", help="zone name or id (default: every zone)")
+    parser.set_defaults(handler=worker_domains, read=True)
+
     parser = subparsers.add_parser("worker-domain-add", help="serve a hostname from a script (custom domain)")
     parser.add_argument("hostname", help="a host of one of the account's zones")
     parser.add_argument("script")
     parser.set_defaults(handler=worker_domain_add)
+
+    parser = subparsers.add_parser("worker-domain-delete", help="detach a custom domain, saved first")
+    parser.add_argument("hostname")
+    parser.set_defaults(handler=worker_domain_delete)

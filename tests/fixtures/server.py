@@ -3,18 +3,21 @@
 
 It keeps its state in memory, answers in Cloudflare's envelope
 ({"success", "errors", "result", "result_info"}) and pages its lists. Each
-token sees its own accounts and zones, read from tests/fixtures/state.json.
+token sees its own accounts and zones, read from tests/fixtures/state.json;
+a token with "policies" may read them, one with "denied" is refused
+every path holding one of its parts, and one with "status" is verified as
+that (expired, disabled) rather than active.
 Requests are logged (method, path, query, body) for the suite to assert on;
 headers, and so tokens, are never logged but for a multipart body's
 Content-Type, kept with the raw body beside its parsed parts.
 
 Control endpoints, outside the API: POST /__reset restores the initial state
 and empties the log, GET /__log returns the log, POST /__fail makes the next
-request matching {"method", "path"} answer {"status", "code", "message"},
-or, given {"location"} instead, answer {"status"} with that Location header,
-or, given {"raw"}, write those bytes as the whole answer. POST /__pages
+request matching {"method", "path"} answer {"status", "code", "message"}
+(with "skip": n, the n matching requests before it pass), or, given
+{"location"} instead, answer {"status"} with that Location header, or, given
+{"raw"}, write those bytes as the whole answer. POST /__pages
 {"total_pages"} makes every list claim that many pages until the next reset.
-            return self._send(200, {"ok": True})
 GET /__state returns the scripts and custom domains as the server holds them,
 POST /__script stores a script as given (state.json's shape).
 
@@ -90,6 +93,8 @@ class State:
         for script in data.get("scripts", []):
             script = dict(script)
             self.scripts[script["id"]] = script
+        for domain in data.get("domains", []):
+            self.domains[domain["hostname"]] = dict(domain)
         self.log = []
         self.fail = []
         self.total_pages = None
@@ -214,6 +219,9 @@ class Handler(BaseHTTPRequestHandler):
         state.log.append({"method": method, "path": url.path, "query": query, "body": body})
         for i, rule in enumerate(state.fail):
             if rule["method"] == method and url.path.endswith(rule["path"]):
+                if rule.get("skip"):
+                    rule["skip"] -= 1
+                    break
                 state.fail.pop(i)
                 if rule.get("raw"):
                     self.close_connection = True
@@ -227,6 +235,8 @@ class Handler(BaseHTTPRequestHandler):
         who = state.tokens.get(token)
         if who is None:
             return self._send(401, failure(10000, "Authentication error"))
+        if any(part in url.path for part in who.get("denied", [])):
+            return self._send(403, failure(9109, "Unauthorized to access requested resource"))
         if not url.path.startswith(PREFIX):
             return self._send(404, failure(7003, "No route for that URI"))
         parts = [p for p in url.path[len(PREFIX):].split("/") if p]
@@ -243,7 +253,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def route(self, state, who, method, parts, query, body):
         if parts == ["user", "tokens", "verify"] and method == "GET":
-            return 200, envelope({"id": who["token_id"], "status": "active", "expires_on": who.get("expires_on")})
+            return 200, envelope({"id": who["token_id"], "status": who.get("status", "active"),
+                                  "expires_on": who.get("expires_on")})
+        if parts[:2] == ["user", "tokens"] and len(parts) == 3 and method == "GET" \
+                or len(parts) == 4 and parts[0] == "accounts" and parts[2] == "tokens" and parts[3] != "verify":
+            # A token reads its own policies only when it was given the right to.
+            if parts[-1] != who["token_id"] or "policies" not in who:
+                raise Problem(403, 9109, "Unauthorized to access requested resource")
+            return 200, envelope({"id": who["token_id"], "status": "active", "policies": who["policies"]})
         if parts == ["accounts"] and method == "GET":
             return 200, page(state, [{"id": a, "name": a + " account"} for a in who["accounts"]], query)
         if len(parts) == 4 and parts[0] == "accounts" and parts[2:] == ["tokens", "verify"]:
@@ -396,16 +413,24 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, envelope({k: script.get(k) for k in ("bindings", "compatibility_date", "compatibility_flags")})
         if parts == ["domains"] and method == "GET":
             found = [d for d in state.domains.values() if d["account"] == account]
-            if "hostname" in query:
-                found = [d for d in found if d["hostname"] == query["hostname"]]
+            for key in ("hostname", "service", "zone_id", "zone_name"):
+                if key in query:
+                    found = [d for d in found if d.get(key) == query[key]]
             return 200, page(state, found, query)
+        if len(parts) == 2 and parts[0] == "domains" and method == "DELETE":
+            domain = next((d for d in state.domains.values() if d["id"] == parts[1] and d["account"] == account), None)
+            if domain is None:
+                raise Problem(404, 100114, "Domain not found")
+            del state.domains[domain["hostname"]]
+            return 200, envelope(None)
         if parts == ["domains"] and method == "PUT":
             if not isinstance(body, dict) or not body.get("hostname") or not body.get("service"):
                 raise Problem(400, 10021, "hostname and service are required")
             if body["service"] not in state.scripts:
                 raise Problem(400, 10007, "This Worker does not exist on your account.")
             domain = {"id": uuid.uuid4().hex, "account": account, "hostname": body["hostname"],
-                      "service": body["service"], "zone_id": body.get("zone_id"), "enabled": True}
+                      "service": body["service"], "zone_id": body.get("zone_id"), "zone_name": body.get("zone_name"),
+                      "enabled": True}
             state.domains[body["hostname"]] = domain
             return 200, envelope(domain)
         raise Problem(404, 7003, "No route for that URI")

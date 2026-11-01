@@ -52,10 +52,13 @@ def _failure(status, data):
 
 class Api:
     """One account's calls. The token is read when a request is sent, set in
-    its Authorization header and nowhere else."""
+    its Authorization header and nowhere else. token(account) reads it: the
+    account's own by default; the doctor gives one that reads the DNS-01
+    token of the Caddy envfile."""
 
-    def __init__(self, account):
+    def __init__(self, account, token=None):
         self.account = account
+        self._token = token or creds.token
 
     def get(self, path, body=None, params=None, raw=False):
         if raw:
@@ -141,7 +144,7 @@ class Api:
         if query:
             url += "?" + urllib.parse.urlencode(query)
         headers = {
-            "Authorization": "Bearer " + creds.token(self.account),
+            "Authorization": "Bearer " + self._token(self.account),
             "Content-Type": content_type,
             "User-Agent": "claude-cloudflare",
         }

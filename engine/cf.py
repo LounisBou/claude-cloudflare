@@ -16,11 +16,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cflib import (accounts, backup, backups, cache, caddy, caddyctl, certs, config, context, creds, dns,  # noqa: E402
-                   errors, iprules, plan, protect, rulesets, security, settings, stdinjson, workers, zones)
+from cflib import (accounts, backup, backups, cache, caddy, caddyctl, certs, check, config, context, creds,  # noqa: E402
+                   dns, errors, iprules, plan, protect, publish, rulesets, security, settings, stdinjson, workers,
+                   zones)
 
 _MODULES = (accounts, zones, dns, backups, settings, certs, plan, rulesets, iprules, security, protect, cache, workers,
-            caddy)
+            caddy, check, publish)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -62,15 +63,9 @@ def is_read(parser, command):
     return bool(subs[command].get_default("read"))
 
 
-def _redact(text, secrets):
-    for secret in secrets:
-        text = text.replace(secret, "[token]")
-    return text
-
-
 def _fail(exc, secrets):
     # One line whatever the message holds, Cloudflare's own included.
-    print("cf: " + " ".join(_redact(exc.message, secrets).split()), file=sys.stderr)
+    print("cf: " + " ".join(creds.redact(exc.message, secrets).split()), file=sys.stderr)
     return exc.code
 
 
@@ -114,7 +109,7 @@ def main(argv, writes=False):
             secrets = creds.secrets([])
         out = run(argv, writes)
         if out:
-            print(_redact(out, secrets))
+            print(creds.redact(out, secrets))
     except errors.CfError as exc:
         return _fail(exc, secrets)
     except Exception as exc:

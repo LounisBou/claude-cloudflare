@@ -12,11 +12,13 @@ export const COMMANDS = [
   'setting-set', 'universal-ssl', 'rule-add', 'rule-update', 'rule-delete', 'block-countries',
   'allow-only-countries', 'rate-limit', 'challenge', 'managed-rules', 'ip-allow', 'ip-block',
   'ip-rule-delete', 'bot-fight', 'security-level', 'under-attack',
-  'cache-rules', 'workers', 'worker-routes',
+  'cache-rules', 'workers', 'worker-routes', 'worker-domains',
   'cache-rule-add', 'cache-rule-delete', 'purge', 'purge-all', 'worker-deploy', 'worker-delete',
-  'worker-route-add', 'worker-route-delete', 'worker-domain-add',
+  'worker-route-add', 'worker-route-delete', 'worker-domain-add', 'worker-domain-delete',
   'caddy-sites', 'caddy-site', 'caddy-status', 'caddy-docs',
   'caddy-site-set', 'caddy-site-remove', 'caddy-reload',
+  'check', 'inventory',
+  'publish', 'unpublish',
 ]
 
 // The commands that only read. Every other one writes to Cloudflare, and a
@@ -24,8 +26,9 @@ export const COMMANDS = [
 export const READS = new Set([
   'auth-check', 'accounts', 'zones', 'dns-list', 'dns-get', 'dns-export', 'backups',
   'settings', 'certs', 'plan', 'rules', 'ip-rules', 'security',
-  'cache-rules', 'workers', 'worker-routes',
+  'cache-rules', 'workers', 'worker-routes', 'worker-domains',
   'caddy-sites', 'caddy-site', 'caddy-status', 'caddy-docs',
+  'check', 'inventory',
 ])
 
 // The writes no session grant covers, asked each time: a deletion, a replay
@@ -76,9 +79,10 @@ async function permit($: any, e: any): Promise<string | undefined> {
   const grantable = !verdict.rule && !NEVER_GRANTED.has(e.command)
   const key = grantable ? await grantKey($, e) : undefined
   if (key && sessionGrants.has(key)) return undefined
-  if (!key) return ask($, describe(e) + '?', ['Allow', 'Deny'], e.command)
+  const described = await describe($, e)
+  if (!key) return ask($, described + '?', ['Allow', 'Deny'], e.command)
   const question = '« Allow for this session » also allows every later cf ' + e.command + ' on '
-    + where(e) + inZone(e) + ' until the session ends. ' + describe(e) + '?'
+    + where(e) + inZone(e) + ' until the session ends. ' + described + '?'
   try {
     const answer = await $.ui.ask(question, ['Allow', 'Allow for this session', 'Deny'])
     if (answer === 'Allow') return undefined
@@ -106,9 +110,17 @@ function isCaddy(command: string): boolean {
   return command.startsWith('caddy-')
 }
 
+// The writes that change a zone and the local Caddy in one command.
+const SPANNING = new Set(['publish', 'unpublish'])
+
 function where(e: any): string {
   if (isCaddy(e.command)) return 'the local Caddy'
-  return e.account ? 'account ' + String(e.account).toLowerCase() : 'the default account'
+  const account = e.account ? 'account ' + String(e.account).toLowerCase() : 'the default account'
+  return SPANNING.has(e.command) ? account + ' and the local Caddy' : account
+}
+
+function cut(text: string): string {
+  return text.length > 200 ? text.slice(0, 199) + '…' : text
 }
 
 function zoneOf(e: any): string {
@@ -124,14 +136,51 @@ function inZone(e: any): string {
 // the cut of a long remainder can never hide them.
 const NAMED = ['zone', 'record', 'name', 'path']
 
-function describe(e: any): string {
+// The command and its target come first, whole: only the remaining arguments are cut.
+async function describe($: any, e: any): Promise<string> {
   const args = e.args ?? {}
+  const host = (isCaddy(e.command) || SPANNING.has(e.command)) && typeof args.host === 'string' ? args.host : undefined
   const named = NAMED.filter((k) => args[k] !== undefined && args[k] !== null)
     .map((k) => k + ' ' + (typeof args[k] === 'string' ? args[k] : JSON.stringify(args[k])))
-  const detail = JSON.stringify(Object.fromEntries(Object.entries(args).filter(([k]) => !NAMED.includes(k))))
-  const host = isCaddy(e.command) && typeof args.host === 'string' ? ' for ' + args.host : ''
-  return 'Run cf ' + e.command + ' on ' + where(e) + host + named.map((n) => ', ' + n).join('') + ' with '
-    + (detail.length > 200 ? detail.slice(0, 199) + '…' : detail)
+  const head = 'Run cf ' + e.command + ' on ' + where(e) + (host ? ' for ' + host : '')
+    + named.map((n) => ', ' + n).join('') + ' with '
+  if (e.command === 'publish') return head + await publishing($, args, host)
+  const detail = cut(JSON.stringify(Object.fromEntries(Object.entries(args).filter(([k]) => !NAMED.includes(k)))))
+  if (e.command === 'unpublish') {
+    return head + detail + '. It removes the site block of ' + host + ' and deletes every A, AAAA and CNAME record of ' + host
+  }
+  return head + detail
+}
+
+// What a publish does, in the order a person reads it: the target, the
+// address, the proxy, what it may overwrite, then the extra file by its size
+// and digest, never its text; the other arguments last, cut.
+async function publishing($: any, args: Record<string, unknown>, host: string | undefined): Promise<string> {
+  const known = ['host', 'to', 'ip', 'no-proxy', 'extra-file']
+  const parts = [
+    '--to ' + cut(String(args.to)),
+    '--ip ' + (args.ip === undefined ? 'the default_target of the config' : cut(String(args.ip))),
+    args['no-proxy'] === true ? 'DNS only (--no-proxy)' : 'proxied',
+  ]
+  let text = parts.join(', ') + '. It may overwrite an existing DNS record of ' + host + ' and its existing site block.'
+  if (args['extra-file'] !== undefined) {
+    const path = String(args['extra-file'])
+    text += ' --extra-file ' + cut(path) + ': ' + await fingerprint($, path)
+  }
+  const rest = Object.fromEntries(Object.entries(args).filter(([name]) => !known.includes(name)))
+  return Object.keys(rest).length ? text + ' Other arguments: ' + cut(JSON.stringify(rest)) : text
+}
+
+async function fingerprint($: any, path: string): Promise<string> {
+  try {
+    const read = await $.fs.read(path, { as: 'bytes' })
+    const bytes = Uint8Array.from(atob(read.base64), (c) => c.charCodeAt(0))
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+    const hex = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('')
+    return bytes.length + ' bytes, sha256 ' + hex.slice(0, 12)
+  } catch {
+    return 'cannot be read, publish will refuse it'
+  }
 }
 
 // A grant is the session's, the command's, the account's (named or the
@@ -157,6 +206,7 @@ export const DIAGNOSTIC: Record<number, string> = {
   12: 'no Cloudflare account: set <NAME>_CLOUDFLARE_API_TOKEN, then run /cloudflare:doctor',
   13: 'a token failed its check: replace it, then run /cloudflare:doctor',
   14: 'the config file is not valid: fix it, then run /cloudflare:doctor',
+  15: 'the local Caddy is not ready: fix what is named, then run /cloudflare:doctor',
 }
 
 // install.sh run in the session's directory, its output verbatim and its exit
@@ -179,10 +229,12 @@ export function register(on: any): void {
       isDeferred: false,
       description:
         'Cloudflare API: accounts by name, zones, DNS records (list, get, export, '
-        + 'create, update, delete), the backups taken before every write and their '
-        + 'restore; and the local Caddy: site blocks of the Caddyfile, set or removed '
+        + 'create, update, delete), protections, cache, Workers (scripts, routes, '
+        + 'custom domains), the backups taken before every write and their '
+        + 'restore; the local Caddy: site blocks of the Caddyfile, set or removed '
         + 'through validate, reload and rollback, with digests of the Caddy docs '
-        + '(caddy-docs). Before first use, Read ' + root + '/engine/REFERENCE.md for every '
+        + '(caddy-docs); and both at once: publish and unpublish a host, check it '
+        + 'from the public side, inventory a zone against the Caddyfile. Before first use, Read ' + root + '/engine/REFERENCE.md for every '
         + 'command. Pass positionals by their documented name (dns-get: {"zone": '
         + '"example.com", "record": "www"}); other keys become --flags. Output is '
         + 'compact text; "json": true on a read gives full objects.',

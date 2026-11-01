@@ -40,6 +40,10 @@ on stderr.
 | `5` | refused by the zone's plan or quota, or by a safety guard |
 | `6` | Caddy change rolled back |
 | `7` | Caddy not alive after reload, rollback failed |
+| `15` | `/cloudflare:doctor` only (`install.sh`): the local Caddy is not ready (binary, service, envfile or its DNS-01 token) |
+
+`/cloudflare:doctor` (`install.sh --check`) has its own codes, listed in
+`commands/doctor.md`; `engine/doctor.py` is its helper, not a command of the tool.
 
 ## Accounts
 
@@ -312,7 +316,8 @@ Asked every time.
 The account's id is `<NAME>_CLOUDFLARE_ACCOUNT_ID`, else the one account the
 token sees. Script backups are kept under `backup_dir/<account>/workers/`
 (kind `worker`); a zone's route backups under the zone's (kind
-`worker-routes`). A script's main module is saved and restored, its name and
+`worker-routes`), and so are the custom domains' (kind `worker-domain`). A
+script's main module is saved and restored, its name and
 content: a module Worker's content is read as multipart, its main module named
 by Cloudflare's `cf-entrypoint` header; a service worker's as plain text, and
 restored as one. A script whose content cannot be saved whole (more than its
@@ -360,6 +365,19 @@ routes backup deletes the routes added since and creates the deleted ones again
 Attaches the hostname (a host of one of the account's zones) to the script as
 a custom domain. Already attached to the same script: `unchanged`; attached to
 another one: exit 5, nothing is overwritten. Output: `attached<TAB>host<TAB>script`.
+
+### `worker-domains [zone]` (read)
+
+The account's custom domains (`GET /accounts/{id}/workers/domains`), or the
+zone's alone. Columns: `id hostname service zone_name`.
+
+### `worker-domain-delete <hostname>` (write)
+
+Saves the custom domain, then detaches it (`DELETE
+/accounts/{id}/workers/domains/{domain id}`); the other domains are kept. A
+hostname that is not a custom domain of the account exits 2, nothing written.
+Lines: `deleted<TAB>host<TAB>script<TAB>zone`, then `backup: <path>`. `restore`
+attaches it again (`restored…`), saving first an attachment taken since.
 
 ## Caddy
 
@@ -479,3 +497,112 @@ Every failure after step 1 ends its error line with `backup: <copy>`. Any
 other exception once the file is written, SIGTERM included, puts the copy back
 before the engine stops. A copy that cannot be put back exits 4 (not 7: caddy
 runs, the file is what failed) and says what caddy runs and what to put back.
+
+## Publish, check and inventory
+
+These commands span a zone and the local Caddy. The zone of a host is the
+longest suffix of it that is a zone of the account.
+
+`check` and `inventory` are reads, but not of the account alone: they resolve
+each host through a public resolver (`1.1.1.1`) and contact the host over
+HTTPS at the public address it resolves to. `inventory` also writes a file: a
+backup of the zone's records.
+
+### `check <host>` (read)
+
+The host as the public sees it, one line under the header: columns `host
+address https issuer expires`. The name is resolved through `1.1.1.1`, asked
+directly (not the machine's resolver); `address` is every IPv4 address it
+gives, its IPv6 ones (`AAAA`) when it has no IPv4, or `nxdomain`, `servfail`,
+`refused` (any other answer code by name or number), `no answer`, `bad answer`
+(another query id, an answer cut short), `resolver timeout`, `no resolver`,
+`bad name` (not ASCII, a label over 63 characters). Then a `GET /`
+over HTTPS to the first address on port 443, SNI and `Host` = the host, the
+certificate verified against the system's authorities: `https` is the HTTP
+status, `down (connect)`, `down (tls)`, `down (timeout)`, `down (http)`, or
+`untrusted (<reason>)` for a certificate that does not verify. `issuer` is the
+certificate's organisation (and common name), `expires` its last day. No
+account and no Caddy is needed. A state is reported, never an exit code: exit
+0 whatever the host answers.
+
+### `inventory <zone>` (read)
+
+1. A backup of every record of the zone (kind `dns`: `restore` replays it).
+2. The SSL settings on one line: `ssl`, `universal_ssl`, `min_tls_version`,
+   `tls_1_3`, `always_use_https`.
+3. One line per host of the zone, the names of its `A`, `AAAA` and `CNAME`
+   records and the https hosts of the Caddyfile under it, checked side by
+   side as `check` does: columns `host record proxied block https issuer
+   expires`. `record` is `<type> <content>` (several joined by ` + `);
+   `block` is `yes`, the addresses of the block that serves it otherwise (a
+   wildcard, a plain HTTP one), or `no`. The checks share one deadline, 90
+   seconds from the start of the command (under the tool's 120): a host whose
+   check has not ended by then is `not checked (time)`. A wildcard is not
+   checked.
+4. `records without block: …` and `blocks without record: …` (`none` when
+   empty). A block covered by a wildcard record has its record.
+5. `backup: <path>`.
+
+Without a `caddy` section, the `block` column is `-` and a `caddy: …` line
+says the blocks are not compared. `--json` gives `zone`, `ssl`, `hosts`,
+`records_without_block`, `blocks_without_record`, `caddy`, `backup`.
+
+### `publish <host> --to <port|upstream> [--no-proxy] [--ip A.B.C.D] [--extra-file <path>]` (write)
+
+One command, one permission ask, for the whole cycle:
+
+1. Before any write, everything that would refuse: the host (a wildcard exits
+   5), `--to` (a port, served as `127.0.0.1:<port>`, or `host:port`,
+   `http://host:port`, `https://…`, `h2c://…`), `--ip` (IPv4, else the config's
+   `default_target`; neither exits 4), the extra file (its braces must
+   balance; an `import`, or a placeholder that reads the environment or a
+   file, `{$…}`, `{env.…}`, `{file.…}`, exits 2), the `caddy` section, the
+   zone. Proxied (the default), the zone
+   must have Universal SSL on and SSL mode `full` or `strict`, else exit 5
+   with the setting to change. An `AAAA` on the name exits 2, naming it. A
+   `CNAME` or several `A` records on the name,
+   a block the Caddy cycle would refuse, an envfile it cannot read or a Caddy
+   whose admin API does not answer exit 5 (4 for a file) with nothing changed.
+2. The `A` record: created, or updated to the address and the proxy, after a
+   backup of the name's records; already right, it is left alone, with no
+   backup (`unchanged`).
+3. The site block, through the Caddy cycle (see below):
+
+   ```
+   https://<host> {
+   	import <tls_snippet>
+   	log
+   	reverse_proxy <to>
+   	<the extra file's directives>
+   }
+   ```
+
+   The host's existing block is replaced, its address kept; else the block is
+   appended. Without `tls_snippet` in the config there is no `import` line,
+   and a `cf: warning:` line on stderr says so. A validate failure of a block
+   with an extra file names the file, not Caddy's line, which may quote it.
+4. `check <host>`.
+
+Output: the record lines (`created`, `before`/`after` or `unchanged`, as the
+DNS writes print them) and `backup: <path>`, the cycle's lines and
+`backup: <copy>`, then the check's header and line. When the check reads no
+HTTP status (`down`, `untrusted`, `nxdomain`…), a last line says
+`published, but the check reads <state>`; the exit stays 0.
+
+A cycle that fails after the record was written (exit 6 or 7, or any other
+failure) puts the record back from its backup before exiting with the
+cycle's code; the error line names the Caddyfile's copy, the backup of the
+state undone and the record's backup. When the record cannot be put back,
+the line says so: replay the backup by hand with `restore`. A record write
+that fails exits 3 before Caddy is touched.
+
+### `unpublish <host>` (write)
+
+Removes the host's site block through the Caddy cycle (the host going down is
+expected), then deletes its `A`, `AAAA` and `CNAME` records after a backup of
+the name; its other records (`MX`, `TXT`…) are kept. With no block, only the
+records go; with no record, only the block. Neither: exit 2. A cycle that
+fails stops it before the records. A deletion that fails puts the deleted
+records back and the block back (a second cycle), and exits 3 naming the
+record's backup and both copies of the Caddyfile. Always asked: no session
+grant covers it.
