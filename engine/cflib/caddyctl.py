@@ -38,6 +38,8 @@ _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Names that would change which programs caddy loads, not what it is told.
 _UNSAFE = re.compile(r"^(?:PATH|LD_.*|DYLD_.*)$")
 DOWN = None
+# A site whose TLS handshake completes but which sends no HTTP line in time: it answers.
+NO_HTTP = "no-http"
 
 
 class Settings:
@@ -220,23 +222,32 @@ def _probe_address():
 
 
 def probe_one(host, address):
-    """The HTTP status the site answers at the address with SNI = host, or
-    DOWN when the connection or the TLS handshake fails, or no HTTP answer
-    comes. The certificate is not checked: the probe is about the reload."""
+    """The HTTP status the site answers at the address with SNI = host;
+    NO_HTTP when the TLS handshake completes but no HTTP line comes; DOWN
+    only when the connection or the TLS handshake fails. The certificate is
+    not checked: the probe is about the reload."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     context.set_alpn_protocols(["http/1.1"])
     request = "HEAD / HTTP/1.1\r\nHost: %s\r\nUser-Agent: claude-cloudflare\r\nConnection: close\r\n\r\n" % host
     try:
-        with socket.create_connection(address, timeout=PROBE_TIMEOUT) as raw:
-            with context.wrap_socket(raw, server_hostname=host) as tls:
+        raw = socket.create_connection(address, timeout=PROBE_TIMEOUT)
+    except (OSError, ValueError):
+        return DOWN
+    with raw:
+        try:
+            tls = context.wrap_socket(raw, server_hostname=host)
+        except (OSError, ssl.SSLError, ValueError):
+            return DOWN
+        with tls:
+            try:
                 tls.sendall(request.encode("ascii"))
                 first = tls.makefile("rb").readline(256)
-    except (OSError, ssl.SSLError, ValueError):
-        return DOWN
+            except (OSError, ssl.SSLError, ValueError):
+                return NO_HTTP
     match = _STATUS.match(first)
-    return int(match.group(1)) if match else DOWN
+    return int(match.group(1)) if match else NO_HTTP
 
 
 def probe(hosts):

@@ -7,8 +7,8 @@ connection, {"alive": bool, "sites": {host: status}}, which fake-caddy.py
 rewrites on each reload:
 
 - TLS: a handshake whose SNI is a host of "sites" completes and the request
-  is answered with that host's status; any other name, or a world that is not
-  alive, fails the handshake.
+  is answered with that host's status (0: the connection closes with no
+  answer); any other name, or a world that is not alive, fails the handshake.
 - admin: GET /config/ answers 200 while the world is alive, 503 otherwise.
 
     world.py <state dir> <cert.pem> <key.pem> <port file>
@@ -53,6 +53,8 @@ def main(state, cert, key, port_file):
                 while reader.readline(4096) not in (b"\r\n", b"\n", b""):
                     pass
                 status = getattr(tls, "fake_status", 200)
+                if status == 0:
+                    return
                 tls.sendall(("HTTP/1.1 %d Fake\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" % status).encode())
             except (ssl.SSLError, OSError):
                 pass

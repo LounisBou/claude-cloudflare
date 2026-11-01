@@ -1846,6 +1846,13 @@ check "a status change is reported, not rolled back" "0" "$CODE"
 check "…one line per host whose status changed" "$(printf 'app.example.com\t200→502\nnew.example.com\tdown→200')" "$(printf '%s\n' "$OUT" | sed '$d')"
 
 caddy_reset
+printf '{"status": {"app.example.com": 0}}\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a site that completes the TLS handshake but sends no HTTP line still answers: no rollback" "0" "$CODE"
+check "…its status is reported as no-http" "$(printf 'app.example.com\t200→no-http\nnew.example.com\tdown→200')" \
+  "$(printf '%s\n' "$OUT" | sed '$d')"
+
+caddy_reset
 cdyw caddy-reload
 check "caddy-reload validates and reloads the file as it is" "0 validate reload" "$CODE $(calls)"
 check "…and prints the copy" "backup: $(ls "$CADDYFILE".bak-*)" "$OUT"
