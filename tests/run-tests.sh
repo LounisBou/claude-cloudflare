@@ -14,8 +14,11 @@ FIXTURES="$ROOT/tests/fixtures"
 WORK=$(mktemp -d)
 SERVER_PID=""
 
+OTHER_PID=""
+
 stop() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
+  [ -n "$OTHER_PID" ] && kill "$OTHER_PID" 2>/dev/null && wait "$OTHER_PID" 2>/dev/null
   rm -rf "$WORK"
 }
 trap stop EXIT
@@ -47,14 +50,19 @@ check_contains() {
 TOKEN_ALPHA=cf-fixture-token-alpha-7f3a9c2e
 TOKEN_BETA=cf-fixture-token-beta-41d08b6a
 
+# A second server on another port is where a redirect points: it must never
+# be reached.
 python3 "$FIXTURES/server.py" "$FIXTURES/state.json" "$WORK/port" &
 SERVER_PID=$!
+python3 "$FIXTURES/server.py" "$FIXTURES/state.json" "$WORK/other-port" &
+OTHER_PID=$!
 for _ in $(seq 1 50); do
-  [ -s "$WORK/port" ] && break
+  [ -s "$WORK/port" ] && [ -s "$WORK/other-port" ] && break
   sleep 0.1
 done
 PORT=$(cat "$WORK/port" 2>/dev/null)
-[ -n "$PORT" ] || { echo "the fixture server did not start"; exit 1; }
+OTHER_PORT=$(cat "$WORK/other-port" 2>/dev/null)
+[ -n "$PORT" ] && [ -n "$OTHER_PORT" ] || { echo "the fixture server did not start"; exit 1; }
 API="http://127.0.0.1:$PORT/client/v4"
 
 # reset: the server back to its initial state, its request log emptied.
@@ -71,6 +79,12 @@ for r in json.load(sys.stdin):
 fail_next() {
   curl -fsS -X POST "http://127.0.0.1:$PORT/__fail" -H 'Content-Type: application/json' \
     -d "{\"method\":\"$1\",\"path\":\"$2\",\"status\":$3,\"code\":$4,\"message\":\"$5\"}" >/dev/null
+}
+
+# redirect_next <method> <path suffix> <status> <location>
+redirect_next() {
+  curl -fsS -X POST "http://127.0.0.1:$PORT/__fail" -H 'Content-Type: application/json' \
+    -d "{\"method\":\"$1\",\"path\":\"$2\",\"status\":$3,\"location\":\"$4\"}" >/dev/null
 }
 
 # The machine-local layout: alpha's token in an env file, beta's in the
@@ -212,6 +226,14 @@ EXTRA_ENV="CF_API_BASE=http://127.0.0.1:1/client/v4" cf zones
 check "an unreachable API exits 3" "3" "$CODE"
 check "an unreachable API is one line" "1" "$(printf '%s\n' "$ERR" | wc -l | tr -d ' ')"
 check_contains "an unreachable API names the failure" "cf: cannot reach the Cloudflare API" "$ERR"
+
+reset
+curl -fsS -X POST "http://127.0.0.1:$OTHER_PORT/__reset" >/dev/null
+redirect_next GET /zones 302 "http://127.0.0.1:$OTHER_PORT/client/v4/zones"
+cf zones
+check "a redirect is not followed and exits 3" "3" "$CODE"
+check "a redirect is one line" "cf: Cloudflare answered HTTP 302, a redirect, which is not followed" "$ERR"
+check "a redirect reaches nothing at its target" "[]" "$(curl -fsS "http://127.0.0.1:$OTHER_PORT/__log")"
 
 echo "== entry points and requests on stdin =="
 

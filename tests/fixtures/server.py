@@ -9,7 +9,8 @@ headers, and so tokens, are never logged.
 
 Control endpoints, outside the API: POST /__reset restores the initial state
 and empties the log, GET /__log returns the log, POST /__fail makes the next
-request matching {"method", "path"} answer {"status", "code", "message"}.
+request matching {"method", "path"} answer {"status", "code", "message"},
+or, given {"location"} instead, answer {"status"} with that Location header.
 
     server.py <state.json> <port file>   binds 127.0.0.1 on a free port
 """
@@ -81,6 +82,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _redirect(self, status, location):
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _body(self):
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
@@ -110,6 +117,8 @@ class Handler(BaseHTTPRequestHandler):
         for i, rule in enumerate(state.fail):
             if rule["method"] == method and url.path.endswith(rule["path"]):
                 state.fail.pop(i)
+                if rule.get("location"):
+                    return self._redirect(rule["status"], rule["location"])
                 return self._send(rule["status"], failure(rule["code"], rule["message"]))
 
         auth = self.headers.get("Authorization", "")

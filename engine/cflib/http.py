@@ -22,6 +22,14 @@ _MAX_RETRIES = 3
 # server that keeps answering pages cannot hold the engine in a loop.
 _MAX_PAGES = 500
 
+# The default handlers but the redirect one: a redirect would carry the
+# Authorization header to wherever it points. A 3xx stays an HTTPError.
+_OPENER = urllib.request.OpenerDirector()
+for _handler in (urllib.request.ProxyHandler(), urllib.request.HTTPHandler(),
+                 urllib.request.HTTPSHandler(), urllib.request.HTTPDefaultErrorHandler(),
+                 urllib.request.HTTPErrorProcessor()):
+    _OPENER.add_handler(_handler)
+
 
 def base_url():
     return (os.environ.get("CF_API_BASE") or API).rstrip("/")
@@ -119,9 +127,11 @@ class Api:
 def _send(method, url, data, headers):
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with _OPENER.open(req, timeout=_TIMEOUT) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise errors.ApiError("Cloudflare answered HTTP %s, a redirect, which is not followed" % exc.code)
         return exc.code, exc.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
