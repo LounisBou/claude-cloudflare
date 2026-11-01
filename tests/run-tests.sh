@@ -440,6 +440,43 @@ check "no backup holds a fixture token" "" \
   "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA" "$WORK/backups" 2>/dev/null)"
 check "the engine prints no traceback" "0" "$(grep -c 'Traceback' "$CAPTURED")"
 
+echo "== the mod and the engine agree =="
+
+# The mod's lists are static; they must name exactly the engine's commands,
+# and its reads exactly the commands the engine marks as reads.
+agreement=$(python3 - "$ENGINE" "$ROOT/hooks/register.ts" <<'PYENUM'
+import re, sys
+sys.path.insert(0, sys.argv[1])
+import cf
+parser = cf.build_parser()
+subs = [a for a in parser._actions if a.dest == "command"][0].choices
+src = open(sys.argv[2], encoding="utf-8").read()
+def listed(head, close):
+    if head not in src:
+        return None
+    return set(re.findall(r"'([a-z-]+)'", src.split(head, 1)[1].split(close, 1)[0]))
+commands = listed("export const COMMANDS = [", "]")
+reads = listed("export const READS = new Set([", "])")
+if commands is None or reads is None:
+    print("no COMMANDS or READS list in register.ts")
+    sys.exit()
+engine_reads = {name for name in subs if cf.is_read(parser, name)}
+print("commands:" + " ".join(sorted(set(subs) ^ commands)) + " reads:" + " ".join(sorted(engine_reads ^ reads)))
+PYENUM
+)
+check "the mod's COMMANDS and READS match the engine's" "commands: reads:" "$agreement"
+
+echo "== the mod =="
+
+if command -v claude >/dev/null 2>&1; then
+  claude plugin test "$ROOT" >"$WORK/mod.log" 2>&1
+  mod_code=$?
+  grep -E '^\(fail\)|^ *[0-9]+ (pass|fail)$' "$WORK/mod.log"
+  check "the mod's tests pass (claude plugin test)" "0" "$mod_code"
+else
+  echo "  skip the mod's tests: claude is not on PATH"
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
