@@ -1675,8 +1675,8 @@ check "…copies the Caddyfile first, beside it, with a UTC timestamp" "1" \
 check "…the copy holds the Caddyfile as it was" "same" "$(same "$copy" "$ORIGINAL")"
 check "…the copy is private" "600" "$(stat -f '%Lp' "$copy" 2>/dev/null || stat -c '%a' "$copy")"
 check "…validates, then reloads" "validate reload" "$(calls)"
-check "validate and reload name the Caddyfile and its adapter in their argv" \
-  "$(printf 'validate --config %s --adapter caddyfile\nreload --config %s --adapter caddyfile' "$CADDYFILE" "$CADDYFILE")" \
+check "validate and reload name the Caddyfile and its adapter, reload the admin API the config names" \
+  "$(printf 'validate --config %s --adapter caddyfile\nreload --config %s --adapter caddyfile --address 127.0.0.1:%s' "$CADDYFILE" "$CADDYFILE" "$ADMIN_PORT")" \
   "$(python3 -c 'import json,sys; [print(" ".join(json.loads(l)["argv"])) for l in open(sys.argv[1])]' "$CSTATE/calls.jsonl")"
 check "the envfile's variables reach caddy through its environment" "$CADDY_TOKEN $CADDY_TOKEN" \
   "$(python3 -c 'import json,sys; print(" ".join(json.loads(l)["env"].get("CF_API_TOKEN", "-") for l in open(sys.argv[1])))' "$CSTATE/calls.jsonl")"
@@ -1812,6 +1812,29 @@ cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a host going down after the reload exits 6" "6" "$CODE"
 check "…restores the Caddyfile byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
 check "…validates and reloads the restored file" "validate reload validate reload" "$(calls)"
+check "…both reloads name the admin API the config names" "--address 127.0.0.1:$ADMIN_PORT --address 127.0.0.1:$ADMIN_PORT" \
+  "$(python3 -c 'import json,sys; print(" ".join(" ".join(a["argv"][-2:]) for a in map(json.loads, open(sys.argv[1])) if a["argv"][0] == "reload"))' "$CSTATE/calls.jsonl")"
+# argv_of <admin, or "" for none>: the argv validate and reload would run, recorded instead of run.
+argv_of() {
+  python3 - "$ENGINE" "$1" <<'PYARGV'
+import sys
+sys.path.insert(0, sys.argv[1])
+from cflib import caddyctl
+class Config:
+    path = "config.json"
+    caddy = {"caddyfile": "/srv/Caddyfile", **({"admin": sys.argv[2]} if sys.argv[2] else {})}
+settings = caddyctl.Settings(Config())
+settings.call = lambda args, variables: (True, " ".join(args))
+print(settings.validate({})[1])
+print(settings.reload({})[1])
+PYARGV
+}
+check "with the default admin API, validate and reload carry no --address" \
+  "$(printf 'validate --config /srv/Caddyfile --adapter caddyfile\nreload --config /srv/Caddyfile --adapter caddyfile')" "$(argv_of '')"
+check "…nor when the config names the default" \
+  "$(printf 'validate --config /srv/Caddyfile --adapter caddyfile\nreload --config /srv/Caddyfile --adapter caddyfile')" "$(argv_of localhost:2019)"
+check "another admin API reaches reload only, validate has no such flag" \
+  "$(printf 'validate --config /srv/Caddyfile --adapter caddyfile\nreload --config /srv/Caddyfile --adapter caddyfile --address 127.0.0.1:2020')" "$(argv_of 127.0.0.1:2020)"
 check "…the second reload had the restored file" "same" "$(same "$CADDYFILE" "$(ls "$CADDYFILE".bak-*)")"
 check "…and names the host and the copy" \
   "cf: app.example.com went down after the reload; the Caddyfile is restored and reloaded; backup: $(ls "$CADDYFILE".bak-*)" \
@@ -1870,7 +1893,7 @@ caddy_config "$WORK/caddy-sudo.json" ', "sudo": true'
 CCONF="$WORK/caddy-sudo.json" CADDY_EXTRA="PATH=$CADDY/sudobin:$PATH" cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "with sudo: true the cycle runs" "0" "$CODE"
 check "…every caddy call goes through sudo -n, keeping the envfile's names, never its values" \
-  "$(printf -- '-n --preserve-env=CF_API_TOKEN,LOG %s validate --config %s --adapter caddyfile\n-n --preserve-env=CF_API_TOKEN,LOG %s reload --config %s --adapter caddyfile' "$FAKE_CADDY" "$CADDYFILE" "$FAKE_CADDY" "$CADDYFILE")" \
+  "$(printf -- '-n --preserve-env=CF_API_TOKEN,LOG %s validate --config %s --adapter caddyfile\n-n --preserve-env=CF_API_TOKEN,LOG %s reload --config %s --adapter caddyfile --address 127.0.0.1:%s' "$FAKE_CADDY" "$CADDYFILE" "$FAKE_CADDY" "$CADDYFILE" "$ADMIN_PORT")" \
   "$(cat "$CSTATE/sudo.log")"
 
 check "no stop, restart or service command anywhere in the engine" "" \

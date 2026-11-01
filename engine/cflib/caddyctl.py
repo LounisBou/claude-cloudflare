@@ -172,7 +172,10 @@ class Settings:
         return self.call(["validate", "--config", self.caddyfile, "--adapter", "caddyfile"], variables)
 
     def reload(self, variables):
-        return self.call(["reload", "--config", self.caddyfile, "--adapter", "caddyfile"], variables)
+        """caddy reload; an admin API other than the default is named, so
+        the Caddy reloaded is the one alive() asks (validate takes no such flag)."""
+        address = ["--address", self.admin] if self.admin != DEFAULT_ADMIN else []
+        return self.call(["reload", "--config", self.caddyfile, "--adapter", "caddyfile"] + address, variables)
 
     def alive(self):
         """Whether the admin API answers GET /config/ with 200. The answer,
