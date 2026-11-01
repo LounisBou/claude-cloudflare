@@ -18,6 +18,7 @@ or, given {"raw"}, write those bytes as the whole answer. POST /__pages
 """
 
 import copy
+import email
 import json
 import os
 import socketserver
@@ -28,7 +29,9 @@ from urllib.parse import parse_qs, urlparse
 
 PREFIX = "/client/v4"
 PROXIABLE = ("A", "AAAA", "CNAME")
-PHASES = ("http_request_firewall_custom", "http_ratelimit", "http_request_firewall_managed")
+PHASES = ("http_request_firewall_custom", "http_ratelimit", "http_request_firewall_managed",
+          "http_request_cache_settings")
+PURGE_KEYS = ("files", "hosts", "prefixes", "tags", "purge_everything")
 DEFAULT_SETTINGS = {
     "ssl": "full", "min_tls_version": "1.2", "tls_1_3": "on", "always_use_https": "off",
     "security_level": "medium", "browser_check": "on", "challenge_ttl": 1800,
@@ -53,6 +56,9 @@ class State:
         self.universal = {}
         self.packs = {}
         self.bot = {}
+        self.scripts = {}
+        self.routes = {}
+        self.domains = {}
         for zone in self.zones:
             for rec in zone.pop("records", []):
                 self.add_record(zone, rec)
@@ -67,6 +73,11 @@ class State:
             self.universal[zid] = {"enabled": True, **zone.pop("universal_ssl", {})}
             self.packs[zid] = zone.pop("cert_packs", [])
             self.bot[zid] = {"fight_mode": False, "enable_js": True, **zone.pop("bot", {})}
+            for route in zone.pop("worker_routes", []):
+                self.add_route(zid, route)
+        for script in data.get("scripts", []):
+            script = dict(script)
+            self.scripts[script["id"]] = script
         self.log = []
         self.fail = []
         self.total_pages = None
@@ -85,6 +96,12 @@ class State:
             "id": old["id"] if old else uuid.uuid4().hex, "name": "default", "kind": "zone",
             "phase": phase, "version": "1", "rules": stored}
         return self.rulesets[zid][phase]
+
+    def add_route(self, zid, route):
+        route = dict(route)
+        route.setdefault("id", uuid.uuid4().hex)
+        self.routes.setdefault(zid, {})[route["id"]] = route
+        return route
 
     def add_ip_rule(self, zid, rule):
         rule = dict(rule)
@@ -142,6 +159,15 @@ class Handler(BaseHTTPRequestHandler):
         if not length:
             return None
         raw = self.rfile.read(length)
+        ctype = self.headers.get("Content-Type", "")
+        if ctype.startswith("multipart/form-data"):
+            message = email.message_from_bytes(
+                b"Content-Type: " + ctype.encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw)
+            return {"__multipart": [
+                {"name": part.get_param("name", header="content-disposition"),
+                 "filename": part.get_filename(), "content_type": part.get_content_type(),
+                 "content": part.get_payload(decode=True).decode()}
+                for part in message.get_payload()]}
         try:
             return json.loads(raw)
         except ValueError:
@@ -201,6 +227,10 @@ class Handler(BaseHTTPRequestHandler):
             if parts[1] not in who["accounts"]:
                 raise Problem(403, 9109, "Unauthorized to access requested resource")
             return 200, envelope({"id": who["token_id"], "status": "active"})
+        if len(parts) >= 3 and parts[0] == "accounts" and parts[2] == "workers":
+            if parts[1] not in who["accounts"]:
+                raise Problem(403, 9109, "Unauthorized to access requested resource")
+            return self.workers_route(state, parts[1], method, parts[3:], query, body)
         if parts == ["zones"] and method == "GET":
             zones = [z for z in state.zones if z["account"]["id"] in who["accounts"]]
             if "name" in query:
@@ -245,6 +275,30 @@ class Handler(BaseHTTPRequestHandler):
             return 200, envelope(state.bot[zid])
         if len(parts) == 4 and parts[:2] == ["rulesets", "phases"] and parts[3] == "entrypoint":
             return self.entrypoint(state, zid, parts[2], method, body)
+        if parts == ["purge_cache"] and method == "POST":
+            given = [k for k in PURGE_KEYS if k in (body or {})]
+            if len(given) != 1 or len(body) != 1:
+                raise Problem(400, 1200, "Purge needs exactly one of %s" % ", ".join(PURGE_KEYS))
+            if given[0] == "purge_everything":
+                if body["purge_everything"] is not True:
+                    raise Problem(400, 1200, "purge_everything must be true")
+            elif not isinstance(body[given[0]], list) or not body[given[0]]:
+                raise Problem(400, 1200, "%s must be a list" % given[0])
+            return 200, envelope({"id": zid})
+        if parts[:2] == ["workers", "routes"]:
+            routes = state.routes.setdefault(zid, {})
+            if len(parts) == 2 and method == "GET":
+                return 200, envelope(list(routes.values()))
+            if len(parts) == 2 and method == "POST":
+                if not isinstance(body, dict) or not body.get("pattern"):
+                    raise Problem(400, 10019, "pattern is required")
+                if any(r["pattern"] == body["pattern"] for r in routes.values()):
+                    raise Problem(409, 10020, "workers.api.error.duplicate_route")
+                return 200, envelope(state.add_route(zid, {"pattern": body["pattern"], "script": body.get("script")}))
+            if len(parts) == 3 and method == "DELETE":
+                if parts[2] not in routes:
+                    raise Problem(404, 10009, "workers.api.error.route_not_found")
+                return 200, envelope({"id": routes.pop(parts[2])["id"]})
         if parts[:3] == ["firewall", "access_rules", "rules"]:
             return self.access_rules(state, zid, method, parts[3:], query, body)
         if parts == ["dns_records", "export"] and method == "GET":
@@ -278,6 +332,47 @@ class Handler(BaseHTTPRequestHandler):
                 del state.records[rec["id"]]
                 new["id"] = rec["id"]
                 return 200, envelope(state.add_record(zone, new))
+        raise Problem(404, 7003, "No route for that URI")
+
+    def workers_route(self, state, account, method, parts, query, body):
+        if parts == ["scripts"] and method == "GET":
+            return 200, page(state, [{k: v for k, v in s.items() if k != "content"}
+                                     for s in state.scripts.values() if s["account"] == account], query)
+        if len(parts) == 2 and parts[0] == "scripts" and method == "PUT":
+            sent = {p["name"]: p for p in (body or {}).get("__multipart", [])}
+            if "metadata" not in sent:
+                raise Problem(400, 10021, "metadata part is required")
+            meta = json.loads(sent["metadata"]["content"])
+            main = meta.get("main_module")
+            if main not in sent:
+                raise Problem(400, 10021, "main_module %s is not a part" % main)
+            state.scripts[parts[1]] = {
+                "id": parts[1], "account": account, "content": sent[main]["content"],
+                "compatibility_date": meta.get("compatibility_date"), "modified_on": "2026-01-01T00:00:00Z"}
+            return 200, envelope({k: v for k, v in state.scripts[parts[1]].items() if k != "content"})
+        if len(parts) >= 2 and parts[0] == "scripts":
+            script = state.scripts.get(parts[1])
+            if script is None or script["account"] != account:
+                raise Problem(404, 10007, "This Worker does not exist on your account.")
+            if method == "DELETE" and len(parts) == 2:
+                del state.scripts[parts[1]]
+                return 200, envelope(None)
+            if method == "GET" and parts[2:] == ["content", "v2"]:
+                return 200, script["content"]
+        if parts == ["domains"] and method == "GET":
+            found = [d for d in state.domains.values() if d["account"] == account]
+            if "hostname" in query:
+                found = [d for d in found if d["hostname"] == query["hostname"]]
+            return 200, page(state, found, query)
+        if parts == ["domains"] and method == "PUT":
+            if not isinstance(body, dict) or not body.get("hostname") or not body.get("service"):
+                raise Problem(400, 10021, "hostname and service are required")
+            if body["service"] not in state.scripts:
+                raise Problem(400, 10007, "This Worker does not exist on your account.")
+            domain = {"id": uuid.uuid4().hex, "account": account, "hostname": body["hostname"],
+                      "service": body["service"], "zone_id": body.get("zone_id"), "enabled": True}
+            state.domains[body["hostname"]] = domain
+            return 200, envelope(domain)
         raise Problem(404, 7003, "No route for that URI")
 
     def setting(self, key, value):

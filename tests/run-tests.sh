@@ -124,11 +124,11 @@ echo "== manifests =="
 
 check "plugin name" "cloudflare" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["name"])' "$ROOT/.claude-plugin/plugin.json")"
-check "plugin version" "0.2.0" \
+check "plugin version" "0.3.0" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$ROOT/.claude-plugin/plugin.json")"
 check "plugin license" "MIT" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["license"])' "$ROOT/.claude-plugin/plugin.json")"
-check "marketplace lists the plugin at the same version" "cloudflare 0.2.0" \
+check "marketplace lists the plugin at the same version" "cloudflare 0.3.0" \
   "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["plugins"][0]; print(p["name"], p["version"])' "$ROOT/.claude-plugin/marketplace.json")"
 check "hooks.json names the module" "./register.ts" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["modules"][0])' "$ROOT/hooks/hooks.json")"
@@ -1106,6 +1106,228 @@ cfwj "{\"command\": \"restore\", \"account\": \"beta\", \"args\": {\"path\": \"$
 check "e2e: restore from the ip6 rule's backup deletes it" "deleted	block	ip6	2001:db8:abcd::1" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
 cfj '{"command": "ip-rules", "account": "beta", "args": {"zone": "example.edu"}}'
 check "e2e: the IPv6 range is left" "block	ip_range	2001:db8:abcd::/48" "$(col 1-3)"
+
+echo "== cache rules =="
+
+CACHE_EP="/rulesets/phases/http_request_cache_settings/entrypoint"
+# last_body <method> <path suffix>: the JSON body of the last such request, compact.
+last_body() {
+  curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+found = [r for r in json.load(sys.stdin) if r["method"] == sys.argv[1] and r["path"].endswith(sys.argv[2])]
+print(json.dumps(found[-1]["body"], sort_keys=True) if found else "none")' "$1" "$2"
+}
+# last_rule: the last rule of the last PUT to the cache entrypoint, as JSON.
+last_rule() { last_body PUT "$CACHE_EP" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["rules"][-1], sort_keys=True))'; }
+
+reset
+cf cache-rules example.com
+check "cache-rules header" "$(printf 'id\tmode\tenabled\tdescription\texpression')" "$(printf '%s\n' "$OUT" | head -1)"
+check "cache-rules shows the dashboard's rule" "$(printf 'cache\tyes\tdashboard: cache css')" "$(col 2-4)"
+cfw cache-rule-add example.com --host tm.example.com
+check "cache-rule-add on a host caches everything" "$(printf 'created\tcache\tyes\tcf-plugin: cache tm.example.com\t(http.host eq "tm.example.com")')" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,3-6)"
+cache_bk=$(backup_of)
+check "the rule is a set_cache_settings that caches" '{"cache": true}' \
+  "$(last_rule | python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r["action_parameters"]), r["action"])' | sed 's/ set_cache_settings$//')"
+check "the dashboard's cache rule was sent back first" "dashboard: cache css" \
+  "$(last_body PUT "$CACHE_EP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rules"][0]["description"])')"
+cf cache-rules example.com
+check "cache-rules shows the foreign rule intact and the new one" "2" "$(col 1 | wc -l | tr -d ' ')"
+check "the backup is of kind ruleset and holds the entrypoint as it was" "1 http_request_cache_settings" \
+  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; print(len(d["rules"]), d["phase"])' "$cache_bk")"
+cfw cache-rule-add example.com --host tm.example.com
+check "the same cache rule twice changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
+
+cfw cache-rule-add example.com --host api.example.com --path-prefix /static --mode ttl --ttl 7200
+check "an edge TTL on a host and a path prefix" \
+  '{"cache": true, "edge_ttl": {"default": 7200, "mode": "override_origin"}} (http.host eq "api.example.com" and starts_with(http.request.uri.path, "/static"))' \
+  "$(last_rule | python3 -c 'import json,sys; r=json.load(sys.stdin); print(json.dumps(r["action_parameters"], sort_keys=True), r["expression"])')"
+cfw cache-rule-add example.com --path-prefix /private --mode bypass
+check "bypass turns the cache off" '{"cache": false}' "$(last_rule | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["action_parameters"]))')"
+cfw cache-rule-add example.com --expression '(ip.src.asn eq 64500)' --mode bypass --description raw
+check "a raw expression is taken whole" "(ip.src.asn eq 64500)" "$(printf '%s\n' "$OUT" | head -1 | cut -f6)"
+raw_id=$(printf '%s\n' "$OUT" | head -1 | cut -f2)
+cfw cache-rule-add example.com --mode ttl --host a.example.com
+check "ttl mode needs --ttl" "2" "$CODE"
+cfw cache-rule-add example.com
+check "a rule with no host, path or expression exits 2" "2" "$CODE"
+cfw cache-rule-add example.com --host a.example.com --expression true
+check "a raw expression excludes the simple forms" "2" "$CODE"
+cfw cache-rule-add example.com --host 'a" or true or "b.example.com'
+check "a host cannot carry an expression" "2" "$CODE"
+cfw cache-rule-delete example.com "$raw_id"
+check "cache-rule-delete prints the rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+del_cache_bk=$(backup_of)
+cf cache-rules example.com
+check "cache-rule-delete kept the foreign rule" "1" "$(printf '%s\n' "$OUT" | grep -c 'dashboard: cache css')"
+cfw cache-rule-delete example.com 00000000000000000000000000000000
+check "an unknown cache rule exits 2" "2 cf: no cache rule 00000000000000000000000000000000 in example.com" "$CODE $ERR"
+cfw restore "$del_cache_bk"
+check "restore puts the cache rules back" "$(printf 'restored\thttp_request_cache_settings\t5 rules')" "$(printf '%s\n' "$OUT" | head -1)"
+cf cache-rules example.com
+check "the deleted cache rule is back" "1" "$(printf '%s\n' "$OUT" | grep -c 'raw')"
+
+reset
+fail_next PUT "$CACHE_EP" 400 20012 "bad rule"
+cfw cache-rule-add example.com --host tm.example.com
+check "a write that fails after its backup exits 3" "3" "$CODE"
+check_contains "…and names the backup in its error line" "cf: Cloudflare 20012: bad rule; backup: $WORK/backups/alpha/example.com/" "$ERR"
+
+# example.net is Free with no entrypoint yet; fill its ten slots.
+reset
+for i in 1 2 3 4 5 6 7 8 9 10; do cfw cache-rule-add example.net --host "h$i.example.net" >/dev/null; done
+cfw cache-rule-add example.net --host h11.example.net
+check "the eleventh cache rule of a Free zone exits 5 naming the plan and the quota" \
+  "5 cf: plan Free Website: cache rules quota is full (10 of 10)" "$CODE $ERR"
+check "the refused cache rule sent no change after the tenth" "10" "$(sent | grep -c "^PUT .*$CACHE_EP")"
+
+echo "== purge =="
+
+reset
+cfw purge example.com --url https://example.com/a.css --url https://www.example.com/b.css
+check "purge by URL says what it purged" "$(printf 'purged\tfiles\t2')" "$OUT"
+check "purge by URL sends files" '{"files": ["https://example.com/a.css", "https://www.example.com/b.css"]}' "$(last_body POST /purge_cache)"
+cfw purge example.com --host www.example.com
+check "purge by host sends hosts" '{"hosts": ["www.example.com"]}' "$(last_body POST /purge_cache)"
+cfw purge example.com --prefix www.example.com/img/
+check "purge by prefix sends prefixes" '{"prefixes": ["www.example.com/img/"]}' "$(last_body POST /purge_cache)"
+cfw purge example.com --tag a --tag b
+check "purge by tag sends tags" '{"tags": ["a", "b"]}' "$(last_body POST /purge_cache)"
+cfwj '{"command": "purge", "args": {"zone": "example.com", "url": ["https://example.com/x"]}}'
+check "stdin json takes a list of URLs" '{"files": ["https://example.com/x"]}' "$(last_body POST /purge_cache)"
+cfw purge example.com
+check "purge with nothing to purge exits 2" "2" "$CODE"
+cfw purge example.com --url https://example.com/a --tag a
+check "purge takes one kind at a time" "2" "$CODE"
+cfw purge example.com --url https://other.test/a
+check "a URL outside the zone exits 2" "2 cf: https://other.test/a is not in example.com" "$CODE $ERR"
+cfw purge example.com --host other.test
+check "a host outside the zone exits 2" "2" "$CODE"
+reset
+urls=$(for i in $(seq 1 101); do printf -- '--url=https://example.com/%s ' "$i"; done)
+cfw purge example.com $urls
+check "more URLs than the plan takes per call exits 5" "5 cf: plan Free Website: purge by URL takes 100 at a time, not 101" "$CODE $ERR"
+check "…and sent no purge" "0" "$(sent | grep -c purge_cache)"
+cfw purge-all example.com
+check "purge-all says so" "$(printf 'purged\teverything\texample.com')" "$OUT"
+check "purge-all sends purge_everything" '{"purge_everything": true}' "$(last_body POST /purge_cache)"
+cf purge-all example.com
+check "cf.py refuses purge-all" "2 cf: purge-all writes: use cf-write.py" "$CODE $ERR"
+
+echo "== Workers =="
+
+printf 'export default { fetch() { return new Response("v2") } }\n' > "$WORK/hello.js"
+printf 'export default { fetch() { return new Response("new") } }\n' > "$WORK/new.js"
+# upload_of <script>: the parts of the last upload of a script, "name|filename|content type" per line.
+upload_of() {
+  curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+found = [r for r in json.load(sys.stdin) if r["method"] == "PUT" and r["path"].endswith("/workers/scripts/" + sys.argv[1])]
+for p in found[-1]["body"]["__multipart"]:
+    print("%s|%s|%s" % (p["name"], p["filename"], p["content_type"]))' "$1"
+}
+# part_of <script> <part>: the content of a part of the last upload of a script.
+part_of() {
+  curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+found = [r for r in json.load(sys.stdin) if r["method"] == "PUT" and r["path"].endswith("/workers/scripts/" + sys.argv[1])]
+print(next(p["content"] for p in found[-1]["body"]["__multipart"] if p["name"] == sys.argv[2]))' "$1" "$2"
+}
+
+reset
+cf workers
+check "workers lists the scripts" "$(printf 'name\tmodified\tcompatibility_date\nhello\t2026-01-01T00:00:00Z\t2025-01-01')" "$OUT"
+cfw worker-deploy fresh --file "$WORK/new.js" --compatibility-date 2026-02-01
+check "worker-deploy says what it deployed" "$(printf 'deployed\tfresh\t2026-02-01')" "$OUT"
+check "the upload is multipart: a metadata part and the module part" \
+  "$(printf 'metadata|None|application/json\nnew.js|new.js|application/javascript+module')" "$(upload_of fresh)"
+check "the metadata names the main module and the compatibility date" \
+  '{"compatibility_date": "2026-02-01", "main_module": "new.js"}' \
+  "$(part_of fresh metadata | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')"
+cfw worker-deploy hello --file "$WORK/hello.js"
+check "redeploying a script says what it deployed" "$(printf 'deployed\thello\t2025-01-01')" "$(printf '%s\n' "$OUT" | head -1)"
+hello_bk=$(backup_of)
+check "…after a backup of its previous content" "export default { fetch() { return new Response('hello') } }" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["content"].strip())' "$hello_bk")"
+cfw worker-deploy bad --file "$WORK/nope.js"
+check "a missing file exits 2" "2" "$CODE"
+cfw worker-deploy 'bad name' --file "$WORK/new.js"
+check "a script name is a plain name" "2" "$CODE"
+cfw worker-delete hello
+check "worker-delete prints the script" "deleted	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2)"
+del_worker_bk=$(backup_of)
+check "the delete's backup is of kind worker" "worker" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' "$del_worker_bk")"
+cf workers
+check "the script is gone" "fresh" "$(col 1)"
+cfw worker-delete hello
+check "deleting an unknown script exits 2" "2 cf: no Worker hello on account alpha" "$CODE $ERR"
+cfw restore "$del_worker_bk"
+check "restore uploads the deleted script again" "restored	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2)"
+cf workers
+check "the script is back" "fresh hello" "$(col 1 | tr '\n' ' ' | sed 's/ $//')"
+check "restore re-uploads the saved module" 'export default { fetch() { return new Response("v2") } }' "$(part_of hello worker.js)"
+
+reset
+cf worker-routes example.com
+check "worker-routes lists the zone's routes" "$(printf 'pattern\tscript')" "$(printf '%s\n' "$OUT" | head -1 | cut -f2,3)"
+check "…the foreign route among them" "example.com/legacy/*	legacy" "$(col 2,3)"
+cfw worker-route-add example.com 'tm.example.com/*' hello
+check "worker-route-add creates the route" "created	tm.example.com/*	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,3,4)"
+route_bk=$(backup_of)
+route_id=$(printf '%s\n' "$OUT" | head -1 | cut -f2)
+check "the route body is a pattern and a script" '{"pattern": "tm.example.com/*", "script": "hello"}' "$(last_body POST /workers/routes)"
+check "the routes backup holds the foreign route" "1" "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]["routes"]))' "$route_bk")"
+cfw worker-route-add example.com 'tm.example.com/*' hello
+check "a duplicate route is Cloudflare's refusal" "3" "$CODE"
+check_contains "…naming the backup" "; backup: " "$ERR"
+cfw worker-route-add example.com 'other.test/*' hello
+check "a pattern outside the zone exits 2" "2" "$CODE"
+cfw worker-route-add example.com 'tm.example.com/*' nope
+check "a route to an unknown script exits 2" "2 cf: no Worker nope on account alpha" "$CODE $ERR"
+cfw worker-route-delete example.com "$route_id"
+check "worker-route-delete prints the route" "deleted	tm.example.com/*	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,3,4)"
+del_route_bk=$(backup_of)
+cf worker-routes example.com
+check "the foreign route is intact" "1" "$(col 1 | wc -l | tr -d ' ')"
+cfw restore "$del_route_bk"
+check "restore brings the deleted route back" "recreated	tm.example.com/*	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,3,4)"
+cfw worker-route-delete example.com 'legacy-nope/*'
+check "an unknown route exits 2" "2" "$CODE"
+
+reset
+cfw worker-domain-add tm.example.com hello
+check "worker-domain-add attaches the hostname" "attached	tm.example.com	hello" "$(printf '%s\n' "$OUT" | cut -f1,2,3)"
+check "the domain body names the zone" \
+  '{"hostname": "tm.example.com", "service": "hello", "zone_id": "0123456789abcdef0123456789abcdef", "zone_name": "example.com"}' \
+  "$(last_body PUT /workers/domains)"
+cfw worker-domain-add tm.example.com hello
+check "attaching the same pair twice changes nothing" "unchanged	tm.example.com	hello" "$OUT"
+cfw worker-deploy fresh --file "$WORK/new.js"
+cfw worker-domain-add tm.example.com fresh
+check "a hostname already on another Worker exits 5" "5" "$CODE"
+cfw worker-domain-add tm2.example.com nope
+check "a domain for an unknown script exits 2" "2" "$CODE"
+
+echo "== end to end: a cache and Workers cycle =="
+
+reset
+cfwj '{"command": "cache-rule-add", "args": {"zone": "example.com", "host": "tm.example.com"}}'
+check "e2e: cache-rule-add on a host" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfj '{"command": "cache-rules", "args": {"zone": "example.com"}}'
+check "e2e: cache-rules shows the new rule and the foreign one" "2 1" "$(col 1 | wc -l | tr -d ' ') $(printf '%s\n' "$OUT" | grep -c 'dashboard: cache css')"
+cfwj '{"command": "purge", "args": {"zone": "example.com", "url": ["https://tm.example.com/a.css"]}}'
+check "e2e: purge by URL" "$(printf 'purged\tfiles\t1')" "$OUT"
+cfwj "{\"command\": \"worker-deploy\", \"args\": {\"name\": \"tm\", \"file\": \"$WORK/new.js\"}}"
+check "e2e: worker-deploy" "deployed" "$(printf '%s\n' "$OUT" | cut -f1)"
+cfwj '{"command": "worker-route-add", "args": {"zone": "example.com", "pattern": "tm.example.com/*", "script": "tm"}}'
+check "e2e: worker-route-add" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfwj '{"command": "worker-delete", "args": {"name": "tm"}}'
+check "e2e: worker-delete" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+e2e_bk=$(backup_of)
+cfwj "{\"command\": \"restore\", \"args\": {\"path\": \"$e2e_bk\"}}"
+check "e2e: restore of the deleted script" "restored	tm" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2)"
+cfj '{"command": "workers"}'
+check "e2e: the script is back" "1" "$(printf '%s\n' "$OUT" | grep -c '^tm')"
 
 echo "== install.sh and the doctor =="
 
