@@ -3282,7 +3282,7 @@ if command -v claude >/dev/null 2>&1; then
   check "the mod's tests pass (claude plugin test)" "0" "$mod_code"
   claude plugin validate "$ROOT" >"$WORK/validate.log" 2>&1
   validate_code=$?
-  grep -E '✘|^ *Error' "$WORK/validate.log"
+  [ "$validate_code" -eq 0 ] || grep -E '✘|^ *❯' "$WORK/validate.log"
   check "the plugin passes claude plugin validate" "0" "$validate_code"
 else
   echo "  skip the mod's tests: claude is not on PATH"
