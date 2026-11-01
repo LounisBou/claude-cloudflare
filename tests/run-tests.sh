@@ -1926,6 +1926,62 @@ check "a caddy run past its time exits 6, the Caddyfile restored" "6 same" "$COD
 check_contains "…saying it did not end in time" "cf: caddy validate failed: caddy validate did not end within 1 seconds" "$ERR"
 check "…and the run is killed with every process it started" "" "$(alive $(cat "$CSTATE/hung.pids"))"
 
+caddy_reset
+inject 'def boom(*args):
+    raise ValueError("injected")
+caddyctl.Settings.validate = boom' caddy-site-set new.example.com --body-file "$BODY"
+check "an exception raised after the write puts the Caddyfile back byte for byte before it goes on" "1 same" \
+  "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…the exception still goes on" "ValueError: injected" "$ERR"
+caddy_reset
+inject 'def interrupt(*args):
+    raise KeyboardInterrupt
+caddyctl.Settings.reload = interrupt' caddy-site-set new.example.com --body-file "$BODY"
+check "an interrupt during the reload puts the Caddyfile back byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+
+caddy_reset
+printf 'hang\n' > "$CSTATE/validate"
+env -i PATH="$PATH" HOME="$HOMEDIR" CF_API_BASE="$API" $(caddy_env) \
+  python3 "$ENGINE/cf-write.py" caddy-site-set new.example.com --body-file "$BODY" >"$WORK/out" 2>"$WORK/err" &
+engine_pid=$!
+for _ in $(seq 1 50); do
+  [ -s "$CSTATE/hung.pids" ] && break
+  sleep 0.1
+done
+check "a validate that hangs runs on the edited Caddyfile" "differs" "$(same "$CADDYFILE" "$ORIGINAL")"
+kill -TERM "$engine_pid"
+wait "$engine_pid"
+check "SIGTERM during the cycle puts the Caddyfile back byte for byte, exit 143" "143 same" "$? $(same "$CADDYFILE" "$ORIGINAL")"
+check "…and kills the caddy it was running" "" "$(alive $(cat "$CSTATE/hung.pids"))"
+cat "$WORK/out" "$WORK/err" >> "$CAPTURED"
+
+caddy_reset
+printf 'fail adapting config\n' > "$CSTATE/validate"
+inject 'real = caddyctl.Settings.write
+writes = []
+def second_fails(self, text):
+    writes.append(text)
+    if len(writes) > 1:
+        raise PermissionError(13, "Permission denied")
+    real(self, text)
+caddyctl.Settings.write = second_fails' caddy-site-set new.example.com --body-file "$BODY"
+check "a Caddyfile that cannot be put back after a failed validate exits 4, not 7" "4" "$CODE"
+check_contains "…saying caddy was not reloaded and still runs, and what to put back" \
+  "the Caddyfile could not be restored (Permission denied): caddy was not reloaded and still runs the config it had; put $CADDYFILE.bak-" "$ERR"
+caddy_reset
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+inject 'real = caddyctl.Settings.write
+writes = []
+def second_fails(self, text):
+    writes.append(text)
+    if len(writes) > 1:
+        raise PermissionError(13, "Permission denied")
+    real(self, text)
+caddyctl.Settings.write = second_fails' caddy-site-set new.example.com --body-file "$BODY"
+check "a Caddyfile that cannot be put back after a reload exits 4, not 7" "4" "$CODE"
+check_contains "…saying caddy runs the reloaded config" \
+  "the Caddyfile could not be restored (Permission denied): caddy runs the changed Caddyfile; put $CADDYFILE.bak-" "$ERR"
+
 check "no stop, restart or service command anywhere in the engine" "" \
   "$(grep -rnE 'brew services|systemctl (re)?start|systemctl stop|launchctl|caddy stop|"stop"|"restart"' "$ENGINE" 2>/dev/null)"
 

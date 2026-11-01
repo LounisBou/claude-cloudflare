@@ -6,13 +6,16 @@ steps: copy the Caddyfile beside itself; probe every site; edit the one block;
 caddy validate, and on failure put the copy back; caddy reload; check the
 admin API answers; probe every site again. A site that answered and no longer
 does, a failed reload or a dead admin API put the copy back, validate and
-reload it, and probe again: exit 6, or 7 when Caddy is still not alive. The
-Caddyfile is the only source of truth: nothing is written through the admin
+reload it, and probe again: exit 6, or 7 when Caddy is still not alive. Any
+other exception once the file is written, SIGTERM included, puts the copy back
+before it goes on; a copy that cannot be put back is exit 4. The Caddyfile is
+the only source of truth: nothing is written through the admin
 API, and Caddy is never stopped or restarted.
 """
 
 import os
 import re
+import signal
 
 from . import caddyctl, caddyfile, errors, fmt
 
@@ -119,8 +122,9 @@ def caddy_docs(args, ctx):
 
 # ---- the cycle ----
 
-def _put_back(settings, original, copy, reason):
-    """The Caddyfile as it was before the edit, or NotAlive naming the copy."""
+def _put_back(settings, original, copy, reason, reloaded):
+    """The Caddyfile as it was before the edit, or a ConfigError naming the
+    copy: caddy did not fail, the file did, and caddy runs what it ran."""
     try:
         settings.write(original)
     except OSError as exc:
@@ -129,14 +133,17 @@ def _put_back(settings, original, copy, reason):
                 return
         except errors.CfError:
             pass
-        raise errors.NotAlive("%s, and the Caddyfile could not be restored (%s): put %s back by hand "
-                              "before anything reloads it; backup: %s" % (reason, exc.strerror, copy, copy))
+        running = "caddy runs the changed Caddyfile" if reloaded else \
+            "caddy was not reloaded and still runs the config it had"
+        raise errors.ConfigError("%s, and the Caddyfile could not be restored (%s): %s; put %s back by hand "
+                                 "before anything reloads it; backup: %s"
+                                 % (reason, exc.strerror, running, copy, copy))
 
 
 def _rollback(settings, variables, original, copy, hosts, broken, reason):
     """Put the copy back, validate and reload it, probe again; raise
     RolledBack, or NotAlive when Caddy still does not answer."""
-    _put_back(settings, original, copy, reason)
+    _put_back(settings, original, copy, reason, True)
     done = "the Caddyfile is restored"
     ok, line = settings.validate(variables)
     if not ok:
@@ -155,10 +162,23 @@ def _rollback(settings, variables, original, copy, hosts, broken, reason):
     raise errors.RolledBack("%s; %s; backup: %s" % (reason, done, copy))
 
 
+def _terminated(signum, frame):
+    # SIGTERM as an exception, so the edited Caddyfile is put back on the way out.
+    raise SystemExit(128 + signum)
+
+
 def cycle(ctx, edit, host=None, removing=False):
     """Run one change through every step. edit(text, blocks, loose) gives the
     new text; the identity for a reload. Lines: one per host whose status
     changed (host<TAB>before→after), then backup: <copy>."""
+    previous = signal.signal(signal.SIGTERM, _terminated)
+    try:
+        return _cycle(ctx, edit, host, removing)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _cycle(ctx, edit, host, removing):
     settings = caddyctl.Settings(ctx.config)
     variables = settings.variables()
     original = settings.read()
@@ -177,25 +197,35 @@ def cycle(ctx, edit, host=None, removing=False):
         settings.write(new)
     except OSError as exc:
         reason = "cannot write %s: %s" % (settings.caddyfile, exc.strerror)
-        _put_back(settings, original, copy, reason)
+        _put_back(settings, original, copy, reason, False)
         raise errors.ConfigError("%s; nothing was changed; backup: %s" % (reason, copy))
-    ok, line = settings.validate(variables)
-    if not ok:
-        reason = "caddy validate failed: %s" % line
-        _put_back(settings, original, copy, reason)
-        raise errors.RolledBack("%s; the Caddyfile is restored; backup: %s" % (reason, copy))
-    ok, line = settings.reload(variables)
-    if not ok:
-        _rollback(settings, variables, original, copy, hosts, [], "caddy reload failed: %s" % line)
-    if not settings.alive():
-        _rollback(settings, variables, original, copy, hosts, [],
-                  "caddy's admin API did not answer after the reload")
-    after = caddyctl.probe(hosts)
-    broken = [h for h in hosts if before[h] is not caddyctl.DOWN and after[h] is caddyctl.DOWN
-              and not (removing and h == host)]
-    if broken:
-        _rollback(settings, variables, original, copy, hosts, broken,
-                  "%s went down after the reload" % ", ".join(broken))
+    reloaded = False
+    try:
+        ok, line = settings.validate(variables)
+        if not ok:
+            reason = "caddy validate failed: %s" % line
+            _put_back(settings, original, copy, reason, False)
+            raise errors.RolledBack("%s; the Caddyfile is restored; backup: %s" % (reason, copy))
+        reloaded = True
+        ok, line = settings.reload(variables)
+        if not ok:
+            _rollback(settings, variables, original, copy, hosts, [], "caddy reload failed: %s" % line)
+        if not settings.alive():
+            _rollback(settings, variables, original, copy, hosts, [],
+                      "caddy's admin API did not answer after the reload")
+        after = caddyctl.probe(hosts)
+        broken = [h for h in hosts if before[h] is not caddyctl.DOWN and after[h] is caddyctl.DOWN
+                  and not (removing and h == host)]
+        if broken:
+            _rollback(settings, variables, original, copy, hosts, broken,
+                      "%s went down after the reload" % ", ".join(broken))
+    except errors.CfError:
+        # Each failure above has dealt with the file already.
+        raise
+    except BaseException:
+        # Anything else, an interrupt or SIGTERM included: the file as it was before going on.
+        _put_back(settings, original, copy, "interrupted", reloaded)
+        raise
     lines = ["%s\t%s→%s" % (h, _status(before[h]), _status(after[h])) for h in hosts if before[h] != after[h]]
     return "\n".join(lines + ["backup: " + copy])
 
