@@ -9,7 +9,8 @@ rewrites on each reload:
 - TLS: a handshake whose SNI is a host of "sites" completes and the request
   is answered with that host's status (0: the connection closes with no
   answer); any other name, or a world that is not alive, fails the handshake.
-- admin: GET /config/ answers 200 while the world is alive, 503 otherwise.
+- admin: GET /config/ answers 200 (or the world's "admin_status") while the
+  world is alive, 503 otherwise.
 
     world.py <state dir> <cert.pem> <key.pem> <port file>
     the port file receives "<tls port> <admin port>"
@@ -63,8 +64,9 @@ def main(state, cert, key, port_file):
 
     class Admin(BaseHTTPRequestHandler):
         def do_GET(self):
-            alive = world(state).get("alive") and self.path == "/config/"
-            self.send_response(200 if alive else 503)
+            now = world(state)
+            alive = now.get("alive") and self.path == "/config/"
+            self.send_response(now.get("admin_status", 200) if alive else 503)
             self.send_header("Content-Length", "2")
             self.end_headers()
             self.wfile.write(b"{}")

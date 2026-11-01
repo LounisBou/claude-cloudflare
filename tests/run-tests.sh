@@ -1556,6 +1556,20 @@ calls() {
 # copies: how many copies of the Caddyfile lie beside it.
 copies() { ls "$CADDYFILE".bak-* 2>/dev/null | wc -l | tr -d ' '; }
 same() { cmp -s "$1" "$2" && echo same || echo differs; }
+# untouched: whether the Caddyfile is the original, then the copies and the calls.
+untouched() { printf '%s %s %s' "$(same "$CADDYFILE" "$ORIGINAL")" "$(copies)" "$(calls)"; }
+# envfile_everywhere: "yes" when every caddy call had the envfile's token in
+# its environment, else the commands that did not.
+envfile_everywhere() {
+  python3 -c 'import json,sys; m=[c["argv"][0] for c in map(json.loads, open(sys.argv[1])) if c["env"].get("CF_API_TOKEN") != sys.argv[2]]; print(" ".join(m) or "yes")' \
+    "$CSTATE/calls.jsonl" "$CADDY_TOKEN"
+}
+# user_only <what>: false, saying so, when the suite runs as root, whom no mode stops.
+user_only() {
+  [ "$(id -u)" != 0 ] && return 0
+  echo "  skip $1: the suite runs as root"
+  return 1
+}
 # inject <python> <command> [args...]: the engine's main after the Python
 # (a patch of the engine) has run, in cdy's environment; OUT, ERR and CODE
 # as run sets them. What it prints is not kept: a patch may raise on purpose.
@@ -1620,6 +1634,7 @@ check_contains "caddy-status names the version" "v2.8.4" "$OUT"
 check_contains "caddy-status counts the sites" "$CADDYFILE: 6 sites" "$OUT"
 check_contains "caddy-status says the service loads the envfile" "launchd $PLIST: --envfile $ENVFILE" "$OUT"
 check "caddy-status runs only version and validate" "version validate" "$(calls)"
+check "…each with the envfile's variables" "yes" "$(envfile_everywhere)"
 check "a launchd service with its envfile gives no warning" "0" "$(printf '%s\n' "$OUT" | grep -c '^warning:')"
 caddy_config "$WORK/caddy-goneenv.json" ", \"envfile\": \"$CADDY/etc/gone.env\""
 CCONF="$WORK/caddy-goneenv.json" inject 'caddyctl.Settings.variables = lambda self: {}' caddy-status
@@ -1687,6 +1702,23 @@ check "an envfile others can read is a warning" "warning: $ENVFILE is readable b
   "$(printf '%s\n' "$OUT" | grep '^warning:')"
 chmod 600 "$ENVFILE"
 
+printf '{"alive": true, "admin_status": 500, "sites": {}}\n' > "$CSTATE/world.json"
+cdy caddy-status
+check "an admin API that answers 500 is not alive" "$(printf 'admin\tdown')" "$(printf '%s\n' "$OUT" | grep '^admin' | cut -f1,2)"
+caddy_config "$WORK/caddy-nosvc.json" ", \"service\": \"$CADDY/absent.plist\""
+CCONF="$WORK/caddy-nosvc.json" cdy caddy-status
+check "a service file that cannot be read is unreadable, with a warning" "$(printf 'service\tunreadable') 1" \
+  "$(printf '%s\n' "$OUT" | grep '^service' | cut -f1,2) $(printf '%s\n' "$OUT" | grep -c "^warning: cannot read $CADDY/absent.plist")"
+printf 'not a plist' > "$CADDY/garbage.plist"
+caddy_config "$WORK/caddy-badsvc.json" ", \"service\": \"$CADDY/garbage.plist\""
+CCONF="$WORK/caddy-badsvc.json" cdy caddy-status
+check "a service file that is no plist is unreadable" "$(printf 'service\tunreadable')" "$(printf '%s\n' "$OUT" | grep '^service' | cut -f1,2)"
+printf '{"default_account": "alpha", "env_files": ["~/.env"], "backup_dir": "%s", "caddy": {"binary": "%s", "caddyfile": "%s", "envfile": "%s", "admin": "127.0.0.1:%s"}}\n' \
+  "$WORK/backups" "$FAKE_CADDY" "$CADDYFILE" "$ENVFILE" "$ADMIN_PORT" > "$WORK/caddy-nomanager.json"
+CCONF="$WORK/caddy-nomanager.json" cdy caddy-status
+check "no manager in the config: the service is not checked" "$(printf 'service\t-\tno manager in the config')" \
+  "$(printf '%s\n' "$OUT" | grep '^service')"
+
 printf '{"alive": false, "sites": {}}\n' > "$CSTATE/world.json"
 cdy caddy-status
 check "caddy-status says when the admin API does not answer" "$(printf 'admin\tdown')" "$(printf '%s\n' "$OUT" | grep '^admin' | cut -f1,2)"
@@ -1743,6 +1775,7 @@ check "…copies the Caddyfile first, beside it, with a UTC timestamp" "1" \
 check "…the copy holds the Caddyfile as it was" "same" "$(same "$copy" "$ORIGINAL")"
 check "…the copy is private" "600" "$(stat -f '%Lp' "$copy" 2>/dev/null || stat -c '%a' "$copy")"
 check "…validates, then reloads" "validate reload" "$(calls)"
+check "…validate and reload each with the envfile's variables" "yes" "$(envfile_everywhere)"
 check "validate and reload name the Caddyfile and its adapter, reload the admin API the config names" \
   "$(printf 'validate --config %s --adapter caddyfile\nreload --config %s --adapter caddyfile --address 127.0.0.1:%s' "$CADDYFILE" "$CADDYFILE" "$ADMIN_PORT")" \
   "$(python3 -c 'import json,sys; [print(" ".join(json.loads(l)["argv"])) for l in open(sys.argv[1])]' "$CSTATE/calls.jsonl")"
@@ -1762,6 +1795,7 @@ rm -f "$CSTATE/calls.jsonl"
 cdyw caddy-site-set app.example.com --body-file "$BODY"
 check "the same block again changes nothing and runs nothing" "$(printf 'unchanged\tapp.example.com') " "$OUT $(calls)"
 check "…and makes no copy" "1" "$(copies)"
+check "…and leaves the file byte for byte" "same" "$(same "$CADDYFILE" "$FIXTURES/caddy/expected-set-app")"
 
 caddy_reset
 cdyw caddy-site-set www.example.com --body-file "$BODY"
@@ -1791,27 +1825,36 @@ caddy_reset
 cdyw caddy-site-set a.example.com --body-file "$BODY"
 check "a block of several addresses is refused with exit 5" "5" "$CODE"
 check_contains "…naming the block" "cf: a.example.com is in the block of line 34 with other addresses (a.example.com, b.example.com)" "$ERR"
+check "…its set writes, copies and runs nothing" "same 0 " "$(untouched)"
 cdyw caddy-site-remove b.example.com
 check "…and is not removed either" "5" "$CODE"
+check "…its remove writes, copies and runs nothing" "same 0 " "$(untouched)"
 cdyw caddy-site-set '*.example.com' --body-file "$BODY"
 check "a wildcard host is refused with exit 5" "5" "$CODE"
+check "…and writes, copies and runs nothing" "same 0 " "$(untouched)"
 check "nothing refused for its addresses was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
 
 cdyw caddy-site-remove nothere.example.com
 check "removing a host with no block exits 2" "2" "$CODE"
+check "…a remove of no block writes, copies and runs nothing" "same 0 " "$(untouched)"
 cdyw caddy-site-set 'a b.example.com' --body-file "$BODY"
 check "a host that is not a name exits 2" "2" "$CODE"
+check "…a host that is no name writes, copies and runs nothing" "same 0 " "$(untouched)"
 cdyw caddy-site-set new.example.com --body-file "$WORK/absent.caddy"
 check "a body file that cannot be read exits 2" "2" "$CODE"
+check "…an unreadable body writes, copies and runs nothing" "same 0 " "$(untouched)"
 printf 'reverse_proxy 127.0.0.1:3000 {\n' > "$WORK/open.caddy"
 cdyw caddy-site-set new.example.com --body-file "$WORK/open.caddy"
 check "a body whose braces do not balance exits 2" "2" "$CODE"
+check "…an unbalanced body writes, copies and runs nothing" "same 0 " "$(untouched)"
 printf '}\nevil.example.com {\n' > "$WORK/close.caddy"
 cdyw caddy-site-set new.example.com --body-file "$WORK/close.caddy"
 check "a body that closes the block early exits 2" "2" "$CODE"
+check "…a body closing early writes, copies and runs nothing" "same 0 " "$(untouched)"
 printf '\n\n' > "$WORK/empty.caddy"
 cdyw caddy-site-set new.example.com --body-file "$WORK/empty.caddy"
 check "an empty body exits 2" "2" "$CODE"
+check "…an empty body writes, copies and runs nothing" "same 0 " "$(untouched)"
 check "nothing refused for its host or its body was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
 
 printf 'example.com {\n\trespond "x"\n' > "$CADDYFILE"
@@ -1825,11 +1868,13 @@ cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a top-level import is no obstacle" "0" "$CODE"
 check "no copy is left by the refused edits" "1" "$(copies)"
 
-caddy_reset
-chmod 000 "$ENVFILE"
-cdyw caddy-site-set new.example.com --body-file "$BODY"
-check "an envfile that cannot be read exits 4 before anything changes" "4 same 0" "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies)"
-chmod 600 "$ENVFILE"
+if user_only "an envfile of mode 000"; then
+  caddy_reset
+  chmod 000 "$ENVFILE"
+  cdyw caddy-site-set new.example.com --body-file "$BODY"
+  check "an envfile that cannot be read exits 4 before anything changes" "4 same 0" "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies)"
+  chmod 600 "$ENVFILE"
+fi
 
 # envkey <line> <what the error names>: an envfile holding the line is refused.
 envkey() {
@@ -1880,6 +1925,7 @@ cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a host going down after the reload exits 6" "6" "$CODE"
 check "…restores the Caddyfile byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
 check "…validates and reloads the restored file" "validate reload validate reload" "$(calls)"
+check "…every call of the cycle and of its rollback had the envfile's variables" "yes" "$(envfile_everywhere)"
 check "…both reloads name the admin API the config names" "--address 127.0.0.1:$ADMIN_PORT --address 127.0.0.1:$ADMIN_PORT" \
   "$(python3 -c 'import json,sys; print(" ".join(" ".join(a["argv"][-2:]) for a in map(json.loads, open(sys.argv[1])) if a["argv"][0] == "reload"))' "$CSTATE/calls.jsonl")"
 # argv_of <admin, or "" for none>: the argv validate and reload would run, recorded instead of run.
@@ -1914,9 +1960,35 @@ caddy_reset
 printf '{"alive": false}\n{"alive": false}\n' > "$CSTATE/reload"
 cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "caddy still not alive after the rollback exits 7" "7" "$CODE"
+check "…after validate, reload, then validate and reload of the restored file" "validate reload validate reload" "$(calls)"
 check "…the Caddyfile is restored all the same" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
 check_contains "…and says to look now" "caddy is not alive after the rollback either" "$ERR"
 check_contains "…naming the copy to put back" "backup: $CADDYFILE.bak-" "$ERR"
+
+caddy_reset
+printf '{"down": ["app.example.com"]}\nfail loading config: listener busy\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a rollback whose reload fails exits 6, the Caddyfile restored" "6 same" "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check "…after validate, reload, validate, reload" "validate reload validate reload" "$(calls)"
+check_contains "…saying the reload of the restored file failed and the host is still down" \
+  "cf: app.example.com went down after the reload; the Caddyfile is restored, but its reload failed (Error: loading config: listener busy), still down: app.example.com; backup: $CADDYFILE.bak-" "$ERR"
+
+caddy_reset
+printf 'pass\nfail adapting config: broken\n' > "$CSTATE/validate"
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a rollback whose restored file does not validate exits 6, the Caddyfile restored, not reloaded" "6 same validate reload validate" \
+  "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
+check_contains "…saying the restored file does not validate" \
+  "cf: app.example.com went down after the reload; the Caddyfile is restored, but it does not validate (Error: adapting config: broken), still down: app.example.com" "$ERR"
+
+caddy_reset
+printf '{"down": ["app.example.com"]}\n' > "$CSTATE/reload"
+cdyw caddy-site-remove www.example.com
+check "a remove that takes another host down is rolled back: exit 6, the Caddyfile restored" "6 same" \
+  "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…naming only the other host, not the removed one" \
+  "cf: app.example.com went down after the reload; the Caddyfile is restored and reloaded" "$ERR"
 
 caddy_reset
 printf '{"alive": false}\n' > "$CSTATE/reload"
@@ -1951,10 +2023,12 @@ cdyw caddy-reload
 check "caddy-reload validates and reloads the file as it is" "0 validate reload" "$CODE $(calls)"
 check "…and writes nothing: no copy, no rewrite, the same modification time" "reloaded 0 same $reload_mtime" \
   "$OUT $(copies) $(same "$CADDYFILE" "$ORIGINAL") $(mtime "$CADDYFILE")"
-chmod 444 "$CADDYFILE"
-cdyw caddy-reload
-check "caddy-reload works on a Caddyfile it cannot write" "0" "$CODE"
-chmod 644 "$CADDYFILE"
+if user_only "a Caddyfile of mode 444 reloaded"; then
+  chmod 444 "$CADDYFILE"
+  cdyw caddy-reload
+  check "caddy-reload works on a Caddyfile it cannot write" "0" "$CODE"
+  chmod 644 "$CADDYFILE"
+fi
 caddy_reset
 printf '{"down": ["www.example.com"]}\n{"down": ["www.example.com"]}\n' > "$CSTATE/reload"
 cdyw caddy-reload
@@ -1974,7 +2048,7 @@ check "…every caddy call goes through sudo -n, keeping the envfile's names, ne
 
 # sudo_lines: the commands sudo was given since the last reset, its own flags dropped.
 sudo_lines() { sed -E 's/^-n (--preserve-env=[^ ]+ )?//' "$CSTATE/sudo.log" 2>/dev/null; }
-if [ "$(id -u)" != 0 ]; then
+if user_only "the files only root can read or write, through sudo"; then
   caddy_reset
   chmod 444 "$CADDYFILE"
   chmod 555 "$CADDY/etc"
@@ -2007,8 +2081,6 @@ if [ "$(id -u)" != 0 ]; then
     "cf: cannot write $CADDYFILE: sudo -n refused tee (sudo: a password is required): it needs a sudoers rule with NOPASSWD" "$ERR"
   check_contains "…nothing changed" "; nothing was changed; backup: $CADDYFILE.bak-" "$ERR"
   chmod 644 "$CADDYFILE"
-else
-  echo "  skip the cases of files the user cannot read or write: the suite runs as root"
 fi
 
 caddy_reset
@@ -2143,19 +2215,21 @@ CCONF="$WORK/caddy-nobinary.json" cdyw caddy-site-set new.example.com --body-fil
 check "a caddy binary that cannot run fails validate: exit 6, the Caddyfile restored" "6 same" "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
 check_contains "…naming the binary" "cf: caddy validate failed: cannot run $CADDY/bin/absent" "$ERR"
 
-caddy_reset
-chmod 444 "$CADDYFILE"
-cdyw caddy-site-set new.example.com --body-file "$BODY"
-check "a Caddyfile that cannot be written exits 4, unchanged, nothing run" "4 same " "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
-check "…saying nothing was changed, before any copy" "cf: cannot write $CADDYFILE: permission denied; nothing was changed 0" \
-  "$ERR $(copies)"
-chmod 644 "$CADDYFILE"
+if user_only "a Caddyfile of mode 444 written"; then
+  caddy_reset
+  chmod 444 "$CADDYFILE"
+  cdyw caddy-site-set new.example.com --body-file "$BODY"
+  check "a Caddyfile that cannot be written exits 4, unchanged, nothing run" "4 same " "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
+  check "…saying nothing was changed, before any copy" "cf: cannot write $CADDYFILE: permission denied; nothing was changed 0" \
+    "$ERR $(copies)"
+  chmod 644 "$CADDYFILE"
+fi
 
 caddy_reset
 printf '{"alive": false, "sites": {}}\n' > "$CSTATE/world.json"
 cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a Caddy whose admin API does not answer is not touched: exit 5" "5" "$CODE"
-check "…nothing written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+check "…the waiting change writes, copies and runs nothing" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
 
 caddy_reset
 printf 'fail invalid token %s\n' "$CADDY_TOKEN" > "$CSTATE/validate"

@@ -69,7 +69,12 @@ def caddy_status(args, ctx):
         except caddyctl.SudoRefused as exc:
             return False, exc.message
 
-    ok, version = run(settings.call, ["version"], {})
+    try:
+        variables, unreadable = settings.variables(), None
+    except errors.ConfigError as exc:
+        variables, unreadable = None, exc
+    # Every caddy run gets the envfile's variables, version included.
+    ok, version = run(settings.call, ["version"], variables or {})
     rows.append({"check": "binary", "state": "ok" if ok else "failed",
                  "detail": "%s: %s" % (settings.binary, version.splitlines()[0] if version else "-")})
     alive = settings.alive()
@@ -83,12 +88,9 @@ def caddy_status(args, ctx):
         rows.append({"check": "caddyfile", "state": "ok", "detail": "%s: %d sites" % (settings.caddyfile, sites)})
     except errors.CfError as exc:
         rows.append({"check": "caddyfile", "state": "unreadable", "detail": exc.message})
-    try:
-        variables = settings.variables()
-    except errors.ConfigError as exc:
-        variables = None
+    if unreadable:
         rows.append({"check": "validate", "state": "skipped", "detail": "the envfile cannot be read"})
-        rows.append({"check": "envfile", "state": "unreadable", "detail": exc.message})
+        rows.append({"check": "envfile", "state": "unreadable", "detail": unreadable.message})
     if variables is not None:
         ok, line = run(settings.validate, variables)
         rows.append({"check": "validate", "state": "ok" if ok else "failed", "detail": None if ok else line})
