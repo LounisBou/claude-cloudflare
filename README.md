@@ -125,8 +125,26 @@ On a machine with a Caddy, the config's `caddy` section names its files:
 ```
 
 `manager` is `launchd` (macOS) or `systemd` (Linux); `sudo: true` runs every
-caddy call as `sudo -n`. The Caddyfile is the only source of truth: nothing is
-written through the admin API, and Caddy is never stopped or restarted.
+caddy call as `sudo -n`, and reads or writes the Caddyfile and its copies
+through `sudo -n cat`, `tee` and `cp -p` when the user cannot. The Caddyfile
+is the only source of truth: nothing is written through the admin API, and
+Caddy is never stopped or restarted.
+
+`sudo -n` never asks for a password: the commands need a sudoers rule without
+one. The envfile's variables reach caddy by name (`--preserve-env=NAMES`),
+which sudo allows only with the `SETENV` tag (or the names in `env_keep`).
+With the paths `command -v` gives, for example in `/etc/sudoers.d/caddy`
+(edited with `visudo -f`):
+
+```
+deploy ALL=(root) NOPASSWD: SETENV: /usr/bin/caddy version, /usr/bin/caddy validate *, /usr/bin/caddy reload *, \
+    /usr/bin/cat /etc/caddy/Caddyfile, /usr/bin/tee /etc/caddy/Caddyfile, \
+    /usr/bin/cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-*
+```
+
+A refusal of sudo is exit 4 and names the rule: before any write nothing is
+changed, after one the Caddyfile is put back; it is never read as a failed
+validate.
 
 `caddy-site-set app.example.com --body-file app.caddy` replaces the block of
 that host, or appends one, and keeps every other byte of the file: global

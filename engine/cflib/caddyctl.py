@@ -5,7 +5,9 @@ its sites.
 The envfile's variables reach caddy through the environment of the child
 process, never its argument vector. With "sudo": true every caddy call is
 prefixed with sudo -n, which keeps those variables by name
-(--preserve-env=NAMES): a password prompt fails instead of waiting. Nothing
+(--preserve-env=NAMES): a password prompt fails instead of waiting. The
+Caddyfile and its copies go through sudo -n too (cat, tee, cp -p) when the
+user cannot read or write them; a refusal of sudo names the rule it needs. Nothing
 here stops, starts or restarts the service: caddy is only validated and
 reloaded.
 """
@@ -13,6 +15,7 @@ reloaded.
 import concurrent.futures
 import contextlib
 import datetime
+import errno
 import fcntl
 import os
 import plistlib
@@ -48,6 +51,8 @@ SECRET_MIN = 8
 _STAMP = "%Y%m%dT%H%M%S.%fZ"
 _STATUS = re.compile(rb"^HTTP/\d(?:\.\d)? (\d{3})")
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# How sudo -n says it will not run a command.
+_REFUSAL = re.compile(r"^(?:sudo: |Sorry, user )")
 # Names that would change which programs caddy loads, not what it is told.
 _UNSAFE = re.compile(r"^(?:PATH|LD_.*|DYLD_.*)$")
 DOWN = None
@@ -72,6 +77,34 @@ class Deadline:
         if self.rolling_back:
             return max(ROLLBACK_MIN, min(default, self.end - time.monotonic()))
         return min(default, self.steps_end - time.monotonic())
+
+
+class SudoRefused(errors.ConfigError):
+    """sudo -n would not run a caddy call: nothing ran, nothing was reloaded."""
+
+
+def _refusal(what, err, keeps):
+    """The error for a sudo -n that refused to run what, or None when sudo
+    ran it (it failed on its own)."""
+    line = next((l.strip() for l in err.splitlines() if _REFUSAL.match(l.strip())), None)
+    if line is None:
+        return None
+    rule = "it needs a sudoers rule with NOPASSWD" + (", and SETENV or env_keep for --preserve-env" if keeps else "")
+    return "sudo -n refused %s (%s): %s, as the README's Caddy section shows" % (what, line, rule)
+
+
+def _run(argv, timeout, env=None, data=None):
+    """(exit code, stdout, stderr) of one run, in a session of its own: on a
+    timeout (TimeoutExpired) or any exception, everything it started is
+    killed with it. OSError when it cannot start."""
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        out, err = proc.communicate(data, timeout=max(0, timeout))
+    except BaseException:
+        _kill(proc)
+        raise
+    return proc.returncode, out, err
 
 
 @contextlib.contextmanager
@@ -141,10 +174,26 @@ class Settings:
 
     # ---- the Caddyfile ----
 
+    def _sudo(self, argv, data=None):
+        """The output of sudo -n <argv>, for a file the user cannot reach;
+        OSError when it fails or sudo refuses it."""
+        try:
+            code, out, err = _run(["sudo", "-n"] + argv, self.timeout(CALL_TIMEOUT), data=data)
+        except subprocess.TimeoutExpired:
+            raise OSError(errno.ETIMEDOUT, "sudo -n %s did not end in time" % argv[0])
+        if code != 0:
+            text = err.decode("utf-8", "replace")
+            lines = [line.strip() for line in text.splitlines() if line.strip()] or ["exit %d" % code]
+            raise OSError(errno.EACCES, _refusal(argv[0], text, False) or "sudo -n %s failed: %s" % (argv[0], lines[-1]))
+        return out
+
     def read(self):
         try:
-            with open(self.caddyfile, "rb") as fh:
-                raw = fh.read()
+            if self.sudo and not os.access(self.caddyfile, os.R_OK):
+                raw = self._sudo(["cat", self.caddyfile])
+            else:
+                with open(self.caddyfile, "rb") as fh:
+                    raw = fh.read()
         except OSError as exc:
             raise errors.ConfigError("cannot read %s: %s" % (self.caddyfile, exc.strerror))
         try:
@@ -153,25 +202,38 @@ class Settings:
             raise errors.ConfigError("%s is not UTF-8 text" % self.caddyfile)
 
     def writable(self):
-        return os.access(self.caddyfile, os.W_OK)
+        return self.sudo or os.access(self.caddyfile, os.W_OK)
 
     def write(self, text):
         """In place: the file keeps its inode, owner and mode, and a symlink
-        keeps pointing where it did."""
+        keeps pointing where it did. Through sudo -n tee when the user
+        cannot write it."""
+        if self.sudo and not os.access(self.caddyfile, os.W_OK):
+            self._sudo(["tee", self.caddyfile], text.encode("utf-8"))
+            return
         with open(self.caddyfile, "wb") as fh:
             fh.write(text.encode("utf-8"))
 
     def copy(self, text):
-        """<caddyfile>.bak-<UTC timestamp>, private, never over an older one."""
+        """<caddyfile>.bak-<UTC timestamp>, private, never over an older one.
+        Where the user cannot write, sudo -n cp -p makes it from the file,
+        which then holds the text: the copy has the Caddyfile's owner and mode."""
         taken = datetime.datetime.now(datetime.timezone.utc)
+        through_sudo = self.sudo and not os.access(os.path.dirname(self.caddyfile) or ".", os.W_OK)
         try:
             while True:
                 path = "%s.bak-%s" % (self.caddyfile, taken.strftime(_STAMP))
-                try:
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                    break
-                except FileExistsError:
-                    taken += datetime.timedelta(microseconds=1)
+                if through_sudo:
+                    if not os.path.lexists(path):
+                        self._sudo(["cp", "-p", self.caddyfile, path])
+                        return path
+                else:
+                    try:
+                        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        break
+                    except FileExistsError:
+                        pass
+                taken += datetime.timedelta(microseconds=1)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(text.encode("utf-8"))
         except OSError as exc:
@@ -209,35 +271,32 @@ class Settings:
     # ---- caddy ----
 
     def call(self, args, variables):
-        """(ok, its output, or the line that says why not) for one caddy run."""
+        """(ok, its output, or the line that says why not) for one caddy run;
+        SudoRefused when sudo -n would not run it."""
         argv = [self.binary] + args
         if self.sudo:
             keep = ["--preserve-env=" + ",".join(sorted(variables))] if variables else []
             argv = ["sudo", "-n"] + keep + argv
         env = dict(os.environ)
         env.update(variables)
+        timeout = max(0, self.timeout(CALL_TIMEOUT))
         try:
-            # A session of its own: on a timeout, everything it started is killed with it.
-            proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, start_new_session=True)
+            code, out, err = _run(argv, timeout, env=env)
         except OSError as exc:
             # A failure like any other: after an edit, the cycle puts the copy back.
             return False, "cannot run %s: %s" % (argv[0], exc.strerror)
-        timeout = max(0, self.timeout(CALL_TIMEOUT))
-        try:
-            out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill(proc)
             return False, "caddy %s did not end within %g seconds" % (args[0], round(timeout, 1))
-        except BaseException:
-            _kill(proc)
-            raise
         hidden = masked(variables)
-        if proc.returncode == 0:
+        if code == 0:
             return True, redact(out.decode("utf-8", "replace").strip(), hidden)
+        if self.sudo:
+            refused = _refusal("caddy " + args[0], err.decode("utf-8", "replace"), bool(variables))
+            if refused:
+                raise SudoRefused(refused)
         # Masked before error_line cuts it: a value cut in two would no longer be found.
         return False, error_line(redact(err.decode("utf-8", "replace") + "\n"
-                                        + out.decode("utf-8", "replace"), hidden), args[0], proc.returncode)
+                                        + out.decode("utf-8", "replace"), hidden), args[0], code)
 
     def validate(self, variables):
         return self.call(["validate", "--config", self.caddyfile, "--adapter", "caddyfile"], variables)

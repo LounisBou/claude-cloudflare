@@ -62,7 +62,14 @@ def caddy_site(args, ctx):
 def caddy_status(args, ctx):
     settings = caddyctl.Settings(ctx.config)
     rows, warnings = [], []
-    ok, version = settings.call(["version"], {})
+
+    def run(call, *args):
+        try:
+            return call(*args)
+        except caddyctl.SudoRefused as exc:
+            return False, exc.message
+
+    ok, version = run(settings.call, ["version"], {})
     rows.append({"check": "binary", "state": "ok" if ok else "failed",
                  "detail": "%s: %s" % (settings.binary, version.splitlines()[0] if version else "-")})
     alive = settings.alive()
@@ -83,7 +90,7 @@ def caddy_status(args, ctx):
         rows.append({"check": "validate", "state": "skipped", "detail": "the envfile cannot be read"})
         rows.append({"check": "envfile", "state": "unreadable", "detail": exc.message})
     if variables is not None:
-        ok, line = settings.validate(variables)
+        ok, line = run(settings.validate, variables)
         rows.append({"check": "validate", "state": "ok" if ok else "failed", "detail": None if ok else line})
         if settings.envfile:
             try:
@@ -269,6 +276,11 @@ def _locked_cycle(settings, edit, host, removing):
         if broken:
             _rollback(settings, variables, original, copy, hosts, broken,
                       "%s went down after the reload" % ", ".join(broken))
+    except caddyctl.SudoRefused as exc:
+        # sudo ran nothing: caddy runs what it ran, and the file goes back as it was.
+        _put_back(settings, original, copy, exc.message, False)
+        done = "the Caddyfile is restored" if copy else "the Caddyfile was not changed"
+        raise errors.ConfigError("%s; %s%s" % (exc.message, done, _backup(copy)))
     except errors.CfError:
         # Each failure above has dealt with the file already.
         raise

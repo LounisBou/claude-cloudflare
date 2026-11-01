@@ -1924,14 +1924,60 @@ check "…and writes nothing either" "0 same" "$(copies) $(same "$CADDYFILE" "$O
 
 caddy_reset
 mkdir -p "$CADDY/sudobin"
-printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/sudo.log"\n[ "$1" = "-n" ] || exit 1\nshift\ncase "$1" in --preserve-env=*) shift ;; esac\nexec "$@"\n' "$CSTATE" > "$CADDY/sudobin/sudo"
-chmod +x "$CADDY/sudobin/sudo"
+ln -sf "$FIXTURES/caddy/fake-sudo.py" "$CADDY/sudobin/sudo"
 caddy_config "$WORK/caddy-sudo.json" ', "sudo": true'
 CCONF="$WORK/caddy-sudo.json" CADDY_EXTRA="PATH=$CADDY/sudobin:$PATH" cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "with sudo: true the cycle runs" "0" "$CODE"
 check "…every caddy call goes through sudo -n, keeping the envfile's names, never its values" \
   "$(printf -- '-n --preserve-env=CF_API_TOKEN,LOG %s validate --config %s --adapter caddyfile\n-n --preserve-env=CF_API_TOKEN,LOG %s reload --config %s --adapter caddyfile --address 127.0.0.1:%s' "$FAKE_CADDY" "$CADDYFILE" "$FAKE_CADDY" "$CADDYFILE" "$ADMIN_PORT")" \
   "$(cat "$CSTATE/sudo.log")"
+
+# sudo_lines: the commands sudo was given since the last reset, its own flags dropped.
+sudo_lines() { sed -E 's/^-n (--preserve-env=[^ ]+ )?//' "$CSTATE/sudo.log" 2>/dev/null; }
+if [ "$(id -u)" != 0 ]; then
+  caddy_reset
+  chmod 444 "$CADDYFILE"
+  chmod 555 "$CADDY/etc"
+  CCONF="$WORK/caddy-sudo.json" CADDY_EXTRA="PATH=$CADDY/sudobin:$PATH" cdyw caddy-site-set new.example.com --body-file "$BODY"
+  copy=$(backup_of)
+  chmod 755 "$CADDY/etc"
+  check "with sudo: true, a Caddyfile and a directory the user cannot write are written through sudo -n" "0 same" \
+    "$CODE $(same "$CADDYFILE" "$FIXTURES/caddy/expected-set-new")"
+  check "…the copy by cp, the file by tee, then caddy" \
+    "$(printf 'cp -p %s %s\ntee %s\n%s validate\n%s reload' "$CADDYFILE" "$copy" "$CADDYFILE" "$FAKE_CADDY" "$FAKE_CADDY")" \
+    "$(sudo_lines | cut -d' ' -f1-4 | sed -E "s#^($FAKE_CADDY [a-z]+).*#\1#")"
+  check "…the copy holds the Caddyfile as it was, the file keeps its mode" "same 444" \
+    "$(same "$copy" "$ORIGINAL") $(stat -f '%Lp' "$CADDYFILE" 2>/dev/null || stat -c '%a' "$CADDYFILE")"
+  chmod 644 "$CADDYFILE"
+
+  caddy_reset
+  chmod 000 "$CADDYFILE"
+  CCONF="$WORK/caddy-sudo.json" CADDY_EXTRA="PATH=$CADDY/sudobin:$PATH" cdy caddy-sites
+  check "with sudo: true, a Caddyfile only root can read is read through sudo -n cat" "0 cat $CADDYFILE" \
+    "$CODE $(sudo_lines)"
+  check_contains "…and listed" "https://app.example.com" "$OUT"
+  chmod 644 "$CADDYFILE"
+
+  caddy_reset
+  chmod 444 "$CADDYFILE"
+  CCONF="$WORK/caddy-sudo.json" CADDY_EXTRA="PATH=$CADDY/sudobin:$PATH FAKE_SUDO=refuse" cdyw caddy-site-set new.example.com --body-file "$BODY"
+  check "a sudo -n that refuses to write the Caddyfile exits 4, the file unchanged, caddy never run" "4 same " \
+    "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
+  check_contains "…naming sudo and the sudoers rule it needs" \
+    "cf: cannot write $CADDYFILE: sudo -n refused tee (sudo: a password is required): it needs a sudoers rule with NOPASSWD" "$ERR"
+  check_contains "…nothing changed" "; nothing was changed; backup: $CADDYFILE.bak-" "$ERR"
+  chmod 644 "$CADDYFILE"
+else
+  echo "  skip the cases of files the user cannot read or write: the suite runs as root"
+fi
+
+caddy_reset
+CCONF="$WORK/caddy-sudo.json" CADDY_EXTRA="PATH=$CADDY/sudobin:$PATH FAKE_SUDO=refuse" cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a sudo -n that refuses caddy validate exits 4, not as a validate failure" "4" "$CODE"
+check "…the Caddyfile restored, caddy never run, nothing reloaded" "same " "$(same "$CADDYFILE" "$ORIGINAL") $(calls)"
+check_contains "…naming sudo, the sudoers rule and --preserve-env" \
+  "cf: sudo -n refused caddy validate (sudo: a password is required): it needs a sudoers rule with NOPASSWD, and SETENV or env_keep for --preserve-env" "$ERR"
+check_contains "…saying the file is restored" "; the Caddyfile is restored; backup: $CADDYFILE.bak-" "$ERR"
 
 caddy_reset
 printf 'hang\n' > "$CSTATE/validate"
