@@ -588,6 +588,26 @@ col() { printf '%s\n' "$OUT" | sed 1d | cut -f"$1"; }
 # mark, then since_mark: the requests sent after the mark, one per line.
 mark() { MARK=$(sent | wc -l); }
 since_mark() { sent | tail -n +$((MARK + 1)); }
+# foreign_kept <zone> <phase>: "kept" when the last PUT since the mark to the
+# zone's entrypoint of the phase carries each dashboard rule the fixture gives
+# that phase whole (id, description, enabled, action, expression and the
+# rest), else what it lost.
+foreign_kept() {
+  curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+with open(sys.argv[1]) as fh:
+    zone = [z for z in json.load(fh)["zones"] if z["name"] == sys.argv[2]][0]
+foreign = zone["rulesets"][sys.argv[3]]
+path = "/zones/%s/rulesets/phases/%s/entrypoint" % (zone["id"], sys.argv[3])
+puts = [r for r in json.load(sys.stdin)[int(sys.argv[4]):] if r["method"] == "PUT" and r["path"].endswith(path)]
+if not puts:
+    sys.exit(print("no PUT"))
+carried = {r.get("id"): r for r in puts[-1]["body"]["rules"]}
+lost = [f["id"] for f in foreign
+        if any(carried.get(f["id"], {}).get(k) != f[k] for k in ("id", "description", "enabled", "action", "expression"))
+        or any(carried[f["id"]].get(k) != v for k, v in f.items())]
+print("lost " + " ".join(lost) if lost else "kept")' "$FIXTURES/state.json" "$1" "$2" "$MARK"
+}
 
 reset
 cf settings example.com
@@ -609,7 +629,7 @@ check "plan prints the plan and the quotas with their use" \
   "$(printf 'item\tvalue\tlimit\nplan\tFree Website\t-\ncustom_rules\t1\t5\nrate_limit_rules\t0\t1\nmanaged_rulesets\tfree\t-\nbot_product\tbot-fight-mode\t-')" "$OUT"
 cf plan example.org
 check "plan reads the plan from its name when it has no legacy id" \
-  "$(printf 'plan\tPro Website\t-\ncustom_rules\t0\t20\nrate_limit_rules\t0\t2\nmanaged_rulesets\tfree,cloudflare,owasp\t-\nbot_product\tsuper-bot-fight-mode\t-')" "$(printf '%s\n' "$OUT" | sed 1d)"
+  "$(printf 'plan\tPro Website\t-\ncustom_rules\t0\t20\nrate_limit_rules\t1\t2\nmanaged_rulesets\tfree,cloudflare,owasp\t-\nbot_product\tsuper-bot-fight-mode\t-')" "$(printf '%s\n' "$OUT" | sed 1d)"
 cf plan example.net --json
 check "plan --json gives the quotas and the use" "Free Website 5 0" \
   "$(printf '%s' "$OUT" | python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["plan"], p["quotas"]["custom_rules"], p["used"]["custom_rules"])')"
@@ -729,8 +749,10 @@ check "a refused write sends no change" "" "$(sent | grep -v '^GET')"
 echo "== rules: composition, merge and foreign rules =="
 
 reset
+mark
 cfw block-countries tm.example.com ru CN
 check "block-countries creates a plugin rule" "created	custom	block	yes	cf-plugin: block-countries tm.example.com RU,CN" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4-6)"
+check "block-countries keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
 bc_bk=$(backup_of)
 check "the host and the countries are composed into an expression" \
   '(http.host eq "tm.example.com" and ip.src.country in {"RU" "CN"})' \
@@ -746,8 +768,10 @@ reset
 cfw block-countries tm.example.com RU CN
 cfw block-countries tm.example.com RU,CN
 check "the same rule twice changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
+mark
 cfw block-countries example.com fr
 check "a zone's name makes the rule zone-wide" '(ip.src.country in {"FR"})' "$(cf rules example.com --plugin; printf '%s\n' "$OUT" | sed 1d | cut -f6 | tail -1)"
+check "block-countries on a whole zone keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
 cfw block-countries nope.test FR
 check "a host of no zone exits 2" "2 cf: no zone of account alpha holds nope.test" "$CODE $ERR"
 cfw block-countries 'a" or true or "b.example.com' FR
@@ -769,25 +793,35 @@ check "rate-limit refuses a path ending in a newline" "2 cf: '/api\n' is not a p
 check "rate-limit with a path ending in a newline sends no write" "" "$(since_mark | grep -v '^GET')"
 
 reset
+mark
 cfw allow-only-countries tm.example.com fr
 check "allow-only-countries blocks every other country" 'block (http.host eq "tm.example.com" and not ip.src.country in {"FR"})' "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | tail -1)"
+check "allow-only-countries keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
+mark
 cfw challenge tm.example.com --path /admin --country RU --country CN
 check "challenge composes host, path and countries" 'managed_challenge (http.host eq "tm.example.com" and starts_with(http.request.uri.path, "/admin") and ip.src.country in {"RU" "CN"})' "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | tail -1)"
+check "challenge keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
+mark
 cfwj '{"command": "challenge", "args": {"target": "api.example.com", "type": "js", "country": ["RU"]}}'
 check "stdin json takes a list of countries and a challenge type" 'js_challenge (http.host eq "api.example.com" and ip.src.country in {"RU"})' "$(last_put "/rulesets/phases/http_request_firewall_custom/entrypoint" | tail -1)"
+check "challenge from stdin json keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
 cf rules example.com --plugin
 check "rules --plugin shows the plugin's rules" "3" "$(col 1 | wc -l | tr -d ' ')"
 
 reset
+mark
 cfw rule-add example.com --expression '(ip.src.asn eq 64500)' --action block --description 'from the agent'
 check "rule-add takes a raw expression" "created	custom	block	yes	from the agent" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4-6)"
+check "rule-add keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
 new_id=$(printf '%s\n' "$OUT" | head -1 | cut -f3)
 cfw rule-add example.com --expression 'true' --action nuke
 check "rule-add refuses an unknown action" "2" "$CODE"
 cfw rule-add example.com --expression 'true' --action log
 check "the log action is refused on a Free zone" "5 cf: plan Free Website: the log action is not offered" "$CODE $ERR"
+mark
 cfw rule-update example.com "$new_id" --no-enabled --description renamed
 check "rule-update shows before and after" "before after" "$(printf '%s\n' "$OUT" | head -2 | cut -f1 | tr '\n' ' ' | sed 's/ $//')"
+check "rule-update keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
 cf rules example.com
 check "rule-update turned the rule off" "no" "$(printf '%s\n' "$OUT" | grep renamed | cut -f4)"
 check "rule-update kept the dashboard rule" "1" "$(printf '%s\n' "$OUT" | grep -c 'dashboard: no wp-login')"
@@ -795,13 +829,17 @@ cfw rule-update example.com "$new_id"
 check "rule-update with nothing to change exits 2" "2" "$CODE"
 cfw rule-update example.com 00000000000000000000000000000000 --action block
 check "an unknown rule exits 2" "2 cf: no rule 00000000000000000000000000000000 in example.com" "$CODE $ERR"
+mark
 cfw rule-delete example.com "$new_id"
 del_bk=$(backup_of)
 check "rule-delete prints the rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+check "rule-delete keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
 cf rules example.com
 check "rule-delete kept the dashboard rule" "dashboard: no wp-login" "$(col 5)"
+mark
 cfw restore "$del_bk"
 check "restore puts the ruleset back" "restored	custom	2 rules" "$(printf '%s\n' "$OUT" | head -1)"
+check "restore keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.com http_request_firewall_custom)"
 cf rules example.com
 check "the deleted rule is back" "2" "$(col 1 | wc -l | tr -d ' ')"
 cfw restore "$del_bk"
@@ -831,13 +869,19 @@ mark
 cfw rate-limit tm.example.com --requests 20 --timeout 600
 check "a Free zone mitigates for 10 seconds only" "5 cf: plan Free Website: the mitigation timeout takes 10 seconds only" "$CODE $ERR"
 check "a refused mitigation timeout sent no change" "" "$(since_mark | grep -v '^GET')"
+mark
 cfw rate-limit example.org --requests 5
 check "a Pro zone counts over 60 seconds and mitigates for 600 by default" "60 5 600" "$(curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
 import json, sys
 r = [x for x in json.load(sys.stdin) if x["method"] == "PUT"][-1]["body"]["rules"][-1]["ratelimit"]
 print(r["period"], r["requests_per_period"], r["mitigation_timeout"])')"
+check "rate-limit keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.org http_ratelimit)"
+# The Pro zone's two slots are taken: back to its dashboard rule alone.
+reset
+mark
 cfw rate-limit www.example.org --requests 5 --period 60 --timeout 3600 --path /api
 check "a Pro zone counts over a minute" "ratelimit" "$(printf '%s\n' "$OUT" | head -1 | cut -f2)"
+check "rate-limit on a path keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.org http_ratelimit)"
 mark
 cfw rate-limit www.example.org --requests 5 --period 120
 check "a Pro zone refuses two minutes" "5" "$CODE"
@@ -850,11 +894,13 @@ check "a Pro zone refuses a mitigation timeout Cloudflare does not take" \
   "5 cf: plan Pro Website: the mitigation timeout takes 10, 15, 20, 30, 40, 45, 60, 90, 120, 180, 240, 300, 480, 600, 900, 1200, 1800, 2400, 3600 seconds only" "$CODE $ERR"
 check "a refused mitigation timeout on Pro sent no change" "" "$(since_mark | grep -v '^GET')"
 reset
+mark
 cfw rate-limit www.example.org --requests 5 --period 30 --timeout 1800
 check "a Pro zone counts over any period it takes up to a minute" "30 1800" "$(curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
 import json, sys
 r = [x for x in json.load(sys.stdin) if x["method"] == "PUT"][-1]["body"]["rules"][-1]["ratelimit"]
 print(r["period"], r["mitigation_timeout"])')"
+check "rate-limit over 30 seconds keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.org http_ratelimit)"
 
 reset
 cfw managed-rules example.com on
@@ -863,8 +909,14 @@ cfw managed-rules example.com on
 check "managed-rules already on changes nothing" "unchanged" "$(printf '%s\n' "$OUT" | cut -f1)"
 cfw managed-rules example.com on --ruleset owasp
 check "OWASP is refused on a Free zone" "5 cf: plan Free Website: no Cloudflare OWASP Core Ruleset" "$CODE $ERR"
+mark
 cfw managed-rules example.org on
 check "a Pro zone deploys the Cloudflare Managed Ruleset" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+check "managed-rules on keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.org http_request_firewall_managed)"
+mark
+cfw managed-rules example.org off
+check "managed-rules off on a Pro zone deletes the plugin's rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+check "managed-rules off keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.org http_request_firewall_managed)"
 cfw managed-rules example.com off
 check "managed-rules off deletes the plugin's rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
 cfw managed-rules example.com off
@@ -950,10 +1002,14 @@ echo "== end to end: a protection cycle on a Free zone at its quota =="
 reset
 cfj '{"command": "plan", "account": "beta", "args": {"zone": "example.edu"}}'
 check "e2e: the plan shows four of five rules used" "custom_rules	4	5" "$(printf '%s\n' "$OUT" | grep custom_rules)"
+mark
 cfwj '{"command": "block-countries", "account": "beta", "args": {"target": "tm.example.edu", "countries": ["RU", "CN"]}}'
 check "e2e: block-countries takes the last slot" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+check "e2e: block-countries keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.edu http_request_firewall_custom)"
+mark
 cfwj '{"command": "allow-only-countries", "account": "beta", "args": {"target": "api.example.edu", "countries": ["FR"]}}'
 check "e2e: allow-only-countries merges under the quota" "before	custom	block" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2,4)"
+check "e2e: the merge keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.edu http_request_firewall_custom)"
 check "e2e: …into one rule" "merged" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1)"
 e2e_merge_bk=$(backup_of)
 cfj '{"command": "rules", "account": "beta", "args": {"zone": "example.edu"}}'
@@ -961,12 +1017,16 @@ check "e2e: rules shows five rules, four of them the dashboard's" "5 4" "$(print
 check "e2e: the merged rule carries both hosts" "2" \
   "$(printf '%s\n' "$OUT" | grep 'cf-plugin' | cut -f6 | grep -o 'tm.example.edu\|api.example.edu' | wc -l | tr -d ' ')"
 merged_id=$(printf '%s\n' "$OUT" | grep 'cf-plugin' | cut -f2)
+mark
 cfwj "{\"command\": \"rule-delete\", \"account\": \"beta\", \"args\": {\"zone\": \"example.edu\", \"rule\": \"$merged_id\"}}"
 check "e2e: rule-delete removes the merged rule" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+check "e2e: rule-delete keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.edu http_request_firewall_custom)"
 cfj '{"command": "rules", "account": "beta", "args": {"zone": "example.edu", "plugin": true}}'
 check "e2e: only the dashboard's four are left" "" "$OUT"
+mark
 cfwj "{\"command\": \"restore\", \"account\": \"beta\", \"args\": {\"path\": \"$(ls -d "$WORK"/backups/beta/example.edu/* | tail -1)\"}}"
 check "e2e: restore from the delete's backup brings the merged rule back" "restored	custom	5 rules" "$(printf '%s\n' "$OUT" | head -1)"
+check "e2e: restore keeps every dashboard rule of the phase whole" "kept" "$(foreign_kept example.edu http_request_firewall_custom)"
 cfj '{"command": "rules", "account": "beta", "args": {"zone": "example.edu", "plugin": true}}'
 check "e2e: the merged rule is back" "1" "$(printf '%s\n' "$OUT" | sed 1d | wc -l | tr -d ' ')"
 reset_log_mark=$(sent | wc -l)
