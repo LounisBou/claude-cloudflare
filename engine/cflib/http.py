@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -99,7 +100,21 @@ class Api:
     def delete(self, path, body=None, params=None):
         return self._request("DELETE", path, body, params).get("result")
 
-    def _request(self, method, path, body, params, raw=False):
+    def put_form(self, path, parts, params=None):
+        """PUT a multipart/form-data body. parts: (name, filename or None,
+        content type, bytes) tuples, sent in order."""
+        boundary = uuid.uuid4().hex
+        chunks = []
+        for name, filename, ctype, content in parts:
+            disposition = 'form-data; name="%s"' % name
+            if filename:
+                disposition += '; filename="%s"' % filename
+            chunks.append(("--%s\r\nContent-Disposition: %s\r\nContent-Type: %s\r\n\r\n"
+                           % (boundary, disposition, ctype)).encode() + content + b"\r\n")
+        form = (b"".join(chunks) + ("--%s--\r\n" % boundary).encode(), "multipart/form-data; boundary=" + boundary)
+        return self._request("PUT", path, None, params, form=form).get("result")
+
+    def _request(self, method, path, body, params, raw=False, form=None):
         url = base_url() + path
         query = {k: v for k, v in (params or {}).items() if v is not None}
         if query:
@@ -110,6 +125,8 @@ class Api:
             "User-Agent": "claude-cloudflare",
         }
         data = json.dumps(body).encode() if body is not None else None
+        if form:
+            data, headers["Content-Type"] = form
         for attempt in range(_MAX_RETRIES):
             status, text = _send(method, url, data, headers)
             # A 429 is a request Cloudflare did not process: sending it again
