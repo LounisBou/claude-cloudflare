@@ -295,6 +295,15 @@ cfj '{"command": "dns-delete", "args": {"zone": "example.com", "record": "www"}}
 check "cf.py refuses a write sent on stdin" "2 cf: dns-delete writes: use cf-write.py" "$CODE $ERR"
 reset
 check "a refused write sends nothing" "" "$(sent)"
+# The guard reads the command the parser selected, not the first word that
+# looks like one: here "zones" is the value of --account, an account that exists.
+EXTRA_ENV="ZONES_CLOUDFLARE_API_TOKEN=$TOKEN_ALPHA" cf --account zones dns-delete example.com www
+check "cf.py refuses a write behind a flag value named like a read" "2 cf: dns-delete writes: use cf-write.py" "$CODE $ERR"
+check "a write behind a flag value sends nothing" "" "$(sent | grep -v '^GET')"
+cf dns-get example.com -- restore
+check "a positional after -- named like a write is read" "2 cf: no record restore.example.com in example.com" "$CODE $ERR"
+cf dns-get example.com dns-delete
+check "a positional named like a write is read" "2 cf: no record dns-delete.example.com in example.com" "$CODE $ERR"
 
 reset
 cfw dns-create example.com --type A --name new --content 203.0.113.5 --proxied

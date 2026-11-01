@@ -60,16 +60,6 @@ def is_read(parser, command):
     return bool(subs[command].get_default("read"))
 
 
-def _command_in(parser, argv):
-    subs = [a for a in parser._actions if a.dest == "command"][0].choices
-    for item in argv:
-        if item == "--":
-            return None
-        if item in subs:
-            return item
-    return None
-
-
 def _redact(text, secrets):
     for secret in secrets:
         text = text.replace(secret, "[token]")
@@ -83,14 +73,15 @@ def _fail(exc, secrets):
 
 def run(argv, writes):
     parser = build_parser()
-    command = _command_in(parser, argv)
-    if command and is_read(parser, command) == writes:
-        if writes:
-            raise errors.UsageError("%s only reads: use cf.py" % command)
-        raise errors.UsageError("%s writes: use cf-write.py" % command)
     args = parser.parse_args(argv)
     if not args.command:
         raise errors.UsageError("no command given; the commands are in engine/REFERENCE.md")
+    # The command the parser selected, never a word of argv that looks like
+    # one: a flag's value or a positional can be named like any command.
+    if is_read(parser, args.command) == writes:
+        if writes:
+            raise errors.UsageError("%s only reads: use cf.py" % args.command)
+        raise errors.UsageError("%s writes: use cf-write.py" % args.command)
     cfg = config.load_config()
     if getattr(args, "account_free", False):
         ctx = context.Context(cfg, None, None, backup)
