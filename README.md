@@ -44,14 +44,16 @@ A token the API echoes back is masked.
 
 - reads: `auth-check`, `accounts`, `zones`, `dns-list`, `dns-get`,
   `dns-export`, `backups`, `settings`, `certs`, `plan`, `rules`, `ip-rules`,
-  `security`, `cache-rules`, `workers`, `worker-routes`;
+  `security`, `cache-rules`, `workers`, `worker-routes`, `caddy-sites`,
+  `caddy-site`, `caddy-status`, `caddy-docs`;
 - writes: `dns-create`, `dns-update` (type change included), `dns-delete`,
   `restore`, `setting-set`, `universal-ssl`, `rule-add`, `rule-update`,
   `rule-delete`, `block-countries`, `allow-only-countries`, `rate-limit`,
   `challenge`, `managed-rules`, `ip-allow`, `ip-block`, `ip-rule-delete`,
   `bot-fight`, `security-level`, `under-attack`, `cache-rule-add`,
   `cache-rule-delete`, `purge`, `purge-all`, `worker-deploy`, `worker-delete`,
-  `worker-route-add`, `worker-route-delete`, `worker-domain-add`.
+  `worker-route-add`, `worker-route-delete`, `worker-domain-add`,
+  `caddy-site-set`, `caddy-site-remove`, `caddy-reload`.
 
 Output is compact text, one line per object; `"json": true` on a read gives
 the full objects. `engine/REFERENCE.md` lists every command, its arguments and
@@ -103,6 +105,46 @@ content before deleting, `worker-route-add` / `worker-route-delete` manage a
 zone's routes and `worker-domain-add` attaches a hostname to a script.
 `restore` puts back cache rules, a deleted script and deleted routes.
 
+## Caddy
+
+On a machine with a Caddy, the config's `caddy` section names its files:
+
+```json
+{
+  "caddy": {
+    "manager": "launchd",
+    "binary": "/usr/local/bin/caddy",
+    "caddyfile": "/usr/local/etc/Caddyfile",
+    "envfile": "/usr/local/etc/caddy.env",
+    "service": "~/Library/LaunchAgents/caddy.plist",
+    "tls_snippet": "tls_config",
+    "sudo": false,
+    "admin": "localhost:2019"
+  }
+}
+```
+
+`manager` is `launchd` (macOS) or `systemd` (Linux); `sudo: true` runs every
+caddy call as `sudo -n`. The Caddyfile is the only source of truth: nothing is
+written through the admin API, and Caddy is never stopped or restarted.
+
+`caddy-site-set app.example.com --body-file app.caddy` replaces the block of
+that host, or appends one, and keeps every other byte of the file: global
+options, snippets, comments and the other sites. `caddy-site-remove` takes a
+block out, `caddy-reload` reloads a file edited by hand. Each runs the same
+cycle: a copy of the Caddyfile beside it, `caddy validate` with the envfile's
+variables in its environment (never in its arguments), `caddy reload`, the
+admin API checked, and every site probed on `127.0.0.1:443` by its name before
+and after. A site that stopped answering, a failed validate or reload, or a
+dead admin API put the copy back (exit 6, or 7 when Caddy still does not
+answer). A block with several addresses, or a wildcard one, is refused: those
+are edited by hand.
+
+`caddy-status` checks the binary, the admin API, the Caddyfile, `caddy
+validate`, the envfile, and that the service (launchd `--envfile`, systemd
+`EnvironmentFile=`) loads the envfile. `caddy-docs` prints short digests of
+caddyserver.com/docs, one per directive family (`docs/caddy/`).
+
 ## Backups and restore
 
 Before every zone write the engine saves what the write touches (the records
@@ -114,7 +156,10 @@ back to the saved records, after saving the current ones.
 ## Tests
 
 Offline: a fixture server on 127.0.0.1 stands in for the Cloudflare API
-(`CF_API_BASE`), and no real account or token is used.
+(`CF_API_BASE`), and no real account or token is used. A fake caddy binary
+and a fake running Caddy (a TLS listener reached through `CF_CADDY_PROBE`, an
+admin API) stand in for Caddy; the suite needs `openssl` for their test
+certificate.
 
 ```
 bash tests/run-tests.sh        # the engine, install.sh, and the mod (claude plugin test)
