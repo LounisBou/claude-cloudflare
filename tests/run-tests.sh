@@ -1375,6 +1375,13 @@ cfw restore "$del_route_bk"
 check "restore brings the deleted route back" "recreated	tm.example.com/*	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,3,4)"
 cfw worker-route-delete example.com 'legacy-nope/*'
 check "an unknown route exits 2" "2" "$CODE"
+check "…and sends no write" "" "$(writes)"
+# example.net has a route that runs no script.
+cfw worker-route-add example.net 'example.net/on/*' hello
+off_bk=$(backup_of)
+cfw worker-route-delete example.net 'example.net/off/*'
+cfw restore "$off_bk"
+check "restore recreates a route with no script without naming one" '{"pattern": "example.net/off/*"}' "$(last_body POST /workers/routes)"
 
 reset
 cfw worker-domain-add tm.example.com hello

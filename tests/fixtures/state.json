@@ -34,6 +34,7 @@
       "status": "active",
       "plan": {"name": "Free Website"},
       "account": {"id": "acc-alpha"},
+      "worker_routes": [{"pattern": "example.net/off/*"}],
       "records": []
     },
     {

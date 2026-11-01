@@ -187,8 +187,11 @@ def restore_routes(ctx, saved):
         ctx.api.delete("%s/%s" % (_routes_path(zone), route["id"]))
         lines.append(_route_line("deleted", route))
     for route in posts:
-        lines.append(_route_line("recreated", ctx.api.post(
-            _routes_path(zone), {"pattern": route["pattern"], "script": route.get("script")})))
+        # A route that runs no script is sent without one, not with a null.
+        body = {"pattern": route["pattern"]}
+        if route.get("script"):
+            body["script"] = route["script"]
+        lines.append(_route_line("recreated", ctx.api.post(_routes_path(zone), body)))
     return lines + ["backup: " + path]
 
 
