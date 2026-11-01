@@ -17,6 +17,7 @@ request matching {"method", "path"} answer {"status", "code", "message"}.
 import copy
 import json
 import os
+import socketserver
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -231,10 +232,18 @@ for _method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
     setattr(Handler, "do_" + _method, (lambda m: lambda self: self._handle(m))(_method))
 
 
+class Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind looks the host up by reverse DNS, which can
+        # hang on a machine whose resolver is slow: the name is never used.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main(argv):
     with open(argv[0], encoding="utf-8") as fh:
         initial = json.load(fh)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = Server(("127.0.0.1", 0), Handler)
     server.state = State(initial)
     with open(argv[1] + ".tmp", "w") as fh:
         fh.write(str(server.server_address[1]))
