@@ -43,9 +43,13 @@ A token the API echoes back is masked.
 `mcp__cloudflare__cf` takes `{ command, args?, account? }`:
 
 - reads: `auth-check`, `accounts`, `zones`, `dns-list`, `dns-get`,
-  `dns-export`, `backups`;
+  `dns-export`, `backups`, `settings`, `certs`, `plan`, `rules`, `ip-rules`,
+  `security`;
 - writes: `dns-create`, `dns-update` (type change included), `dns-delete`,
-  `restore`.
+  `restore`, `setting-set`, `universal-ssl`, `rule-add`, `rule-update`,
+  `rule-delete`, `block-countries`, `allow-only-countries`, `rate-limit`,
+  `challenge`, `managed-rules`, `ip-allow`, `ip-block`, `ip-rule-delete`,
+  `bot-fight`, `security-level`, `under-attack`.
 
 Output is compact text, one line per object; `"json": true` on a read gives
 the full objects. `engine/REFERENCE.md` lists every command, its arguments and
@@ -66,10 +70,26 @@ that one account until the session ends. It is never offered for
 as a read is a write. Where nobody can answer (`claude -p`), a write is
 refused.
 
+## Zone settings and protections
+
+`settings` reads every zone setting generically; `setting-set`, `universal-ssl`
+and `certs` cover SSL mode, Universal SSL, minimum TLS, TLS 1.3, Always Use
+HTTPS and the edge certificate packs. Protections are one call each:
+`block-countries tm.example.com RU CN`, `allow-only-countries tm.example.com
+FR`, `challenge`, `rate-limit`, `managed-rules`, `ip-block`, `bot-fight`,
+`under-attack`; `rule-add` takes a raw Cloudflare expression for the rest.
+
+A ruleset write reads the zone's whole entrypoint, changes only the rule it
+targets and writes everything back: rules made in the dashboard are never
+lost. `plan` prints the zone's plan and the quotas the engine relies on; a
+write the plan cannot take (a feature it lacks, a full quota) exits 5 with the
+reason and sends nothing. On a Free zone, block rules for several hosts merge
+into one when the five custom rules are used up.
+
 ## Backups and restore
 
-Before every zone write the engine saves the records of the names the write
-touches to `backup_dir/<account>/<zone>/<UTC timestamp>-<kind>.json`, and the
+Before every zone write the engine saves what the write touches (the records
+of the names, the whole ruleset entrypoint, the settings or access rules) to `backup_dir/<account>/<zone>/<UTC timestamp>-<kind>.json`, and the
 write's output ends with `backup: <path>`. A backup that cannot be written
 stops the write. `backups` lists them; `restore <path>` brings those names
 back to the saved records, after saving the current ones.
