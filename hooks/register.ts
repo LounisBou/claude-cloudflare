@@ -12,6 +12,9 @@ export const COMMANDS = [
   'setting-set', 'universal-ssl', 'rule-add', 'rule-update', 'rule-delete', 'block-countries',
   'allow-only-countries', 'rate-limit', 'challenge', 'managed-rules', 'ip-allow', 'ip-block',
   'ip-rule-delete', 'bot-fight', 'security-level', 'under-attack',
+  'cache-rules', 'workers', 'worker-routes',
+  'cache-rule-add', 'cache-rule-delete', 'purge', 'purge-all', 'worker-deploy', 'worker-delete',
+  'worker-route-add', 'worker-route-delete', 'worker-domain-add',
 ]
 
 // The commands that only read. Every other one writes to Cloudflare, and a
@@ -19,6 +22,7 @@ export const COMMANDS = [
 export const READS = new Set([
   'auth-check', 'accounts', 'zones', 'dns-list', 'dns-get', 'dns-export', 'backups',
   'settings', 'certs', 'plan', 'rules', 'ip-rules', 'security',
+  'cache-rules', 'workers', 'worker-routes',
 ])
 
 // The writes no session grant covers, asked each time: a deletion, a replay
