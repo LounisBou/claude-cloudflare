@@ -209,9 +209,9 @@ def _terminated(signum, frame):
 
 
 def cycle(ctx, edit, host=None, removing=False):
-    """Run one change through every step. edit(text, blocks, loose) gives the
-    new text; the identity for a reload, which writes nothing. Lines: one per
-    host whose status changed (host<TAB>before→after), then backup: <copy>;
+    """Run one change through every step. edit(text) gives the new text;
+    the identity for a reload, which writes nothing. Lines: one per host
+    whose status changed (host<TAB>before→after), then backup: <copy>;
     "reloaded" when a reload has neither."""
     previous = signal.signal(signal.SIGTERM, _terminated)
     try:
@@ -230,8 +230,8 @@ def _cycle(ctx, edit, host, removing):
 def _locked_cycle(settings, edit, host, removing):
     variables = settings.variables()
     original = settings.read()
-    blocks, loose = caddyfile.parse(original)
-    new = edit(original, blocks, loose)
+    blocks, _ = caddyfile.parse(original)
+    new = edit(original)
     if host and new == original:
         return "unchanged\t%s" % host
     # A reload of the file as it is writes nothing: no copy, no rewrite.
@@ -305,29 +305,17 @@ def caddy_site_set(args, ctx):
     host = caddyfile.host_name(args.host)
     lines = _body(args.body_file)
 
-    def edit(text, blocks, loose):
-        block = caddyfile.target(text, blocks, loose, host)
-        if block is None:
-            return caddyfile.append(text, host, lines)
-        return caddyfile.replace(text, block, lines)
-
-    return cycle(ctx, edit, host)
+    return cycle(ctx, lambda text: caddyfile.set_site(text, host, lines), host)
 
 
 def caddy_site_remove(args, ctx):
     host = caddyfile.host_name(args.host)
 
-    def edit(text, blocks, loose):
-        block = caddyfile.target(text, blocks, loose, host)
-        if block is None:
-            raise errors.UsageError("no site block for %s in the Caddyfile" % host)
-        return caddyfile.remove(text, block)
-
-    return cycle(ctx, edit, host, removing=True)
+    return cycle(ctx, lambda text: caddyfile.remove_site(text, host), host, removing=True)
 
 
 def caddy_reload(args, ctx):
-    return cycle(ctx, lambda text, blocks, loose: text)
+    return cycle(ctx, lambda text: text)
 
 
 def register(subparsers):

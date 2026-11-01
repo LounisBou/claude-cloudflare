@@ -5,7 +5,8 @@ The lexer follows Caddy's: tokens are split on whitespace; a "#" that starts a
 token runs to the end of the line; a token that starts with a double quote or
 a backtick runs to the closing one (a backslash escapes inside double quotes
 and outside quotes); "<<MARKER" at the end of a line opens a heredoc that the
-first line starting with MARKER closes. A brace opens or closes a block only
+first line holding MARKER after its indentation, alone or followed by a space
+("MARKER 200"), closes. A brace opens or closes a block only
 as a token of its own and unquoted, so "{host}", "{$TOKEN}" or a "{" inside
 quotes, a comment or a heredoc is a word.
 
@@ -13,8 +14,8 @@ Nothing here reads or writes a file: the edits take the text and give back
 the new text, so the bytes outside the edited block come through untouched.
 """
 
+import os
 import re
-import textwrap
 
 from . import errors
 
@@ -110,7 +111,8 @@ def tokens(text, refuse=_refuse):
                 eol = text.find("\n", i)
                 eol = n if eol < 0 else eol
                 content = text[i:eol].lstrip(" \t")
-                if content.startswith(marker):
+                rest = content[len(marker):]
+                if content.startswith(marker) and (not rest or rest[0].isspace()):
                     i = eol - len(content) + len(marker)
                     break
                 i = eol + 1
@@ -183,7 +185,8 @@ def site_host(address):
         return None
     if not host or "*" in host or "{" in host:
         return None
-    return host
+    # "host." is the same name, fully qualified.
+    return host[:-1] if host.endswith(".") else host
 
 
 def _covers(address, host):
@@ -246,6 +249,9 @@ def target(text, blocks, loose, host):
             if len(block.addresses) == 1 and block.addresses[0].lower() in (host, "https://" + host):
                 exact.append(block)
                 continue
+            if len(block.addresses) == 1:
+                raise errors.Refused("%s is written %s in the block of line %d: edit that block by hand"
+                                     % (host, block.addresses[0], block.line))
             raise errors.Refused("%s is in the block of line %d with other addresses (%s): edit that block by hand"
                                  % (host, block.line, ", ".join(block.addresses)))
     if len(exact) > 1:
@@ -254,13 +260,31 @@ def target(text, blocks, loose, host):
     return exact[0] if exact else None
 
 
+def set_site(text, host, lines):
+    """The text with the host's block given the lines, or a block appended for it."""
+    blocks, loose = parse(text)
+    block = target(text, blocks, loose, host)
+    return append(text, host, lines) if block is None else replace(text, block, lines)
+
+
+def remove_site(text, host):
+    """The text without the host's block; exit 2 when it has none."""
+    blocks, loose = parse(text)
+    block = target(text, blocks, loose, host)
+    if block is None:
+        raise errors.UsageError("no site block for %s in the Caddyfile" % host)
+    return remove(text, block)
+
+
 def _newline(text):
     return "\r\n" if "\r\n" in text else "\n"
 
 
 def body(raw):
     """A block's body as a file gives it: its braces checked, its common
-    indentation replaced by one tab. Exit 2 for an empty or unbalanced body."""
+    indentation replaced by one tab. The lines inside a token that runs over
+    several (a backtick string, a heredoc) keep their bytes and count for no
+    indentation. Exit 2 for an empty or unbalanced body."""
     lines = raw.replace("\r\n", "\n").split("\n")
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -272,8 +296,9 @@ def body(raw):
     def unbalanced(what, line):
         raise errors.UsageError("the body cannot be used: %s at line %d" % (what, line))
 
-    depth = 0
+    depth, inner = 0, set()
     for tok in tokens("\n".join(lines), refuse=unbalanced):
+        inner.update(range(tok.line + 1, tok.end_line + 1))
         if tok.is_open():
             depth += 1
         elif tok.is_close():
@@ -282,7 +307,10 @@ def body(raw):
                 unbalanced("a closing brace closes the site block", tok.line)
     if depth:
         unbalanced("a block is never closed", len(lines))
-    return [("\t" + line) if line.strip() else "" for line in textwrap.dedent("\n".join(lines)).split("\n")]
+    outer = [line for k, line in enumerate(lines, 1) if k not in inner and line.strip()]
+    margin = len(os.path.commonprefix([line[:len(line) - len(line.lstrip())] for line in outer]))
+    return [line if k in inner else ("\t" + line[margin:] if line.strip() else "")
+            for k, line in enumerate(lines, 1)]
 
 
 def _block_text(address, lines, nl):
@@ -297,12 +325,17 @@ def replace(text, block, lines):
 
 
 def append(text, host, lines):
-    """A new block https://<host> at the end, after one blank line."""
+    """A new block https://<host> at the end, after one blank line: the
+    blank lines that end the text are that one."""
     nl = _newline(text)
     new = _block_text("https://" + host, lines, nl) + nl
-    if not text:
+    kept = text.splitlines(True)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    if not kept:
         return new
-    return text + ("" if text.endswith("\n") else nl) + nl + new
+    head = "".join(kept)
+    return head + ("" if head.endswith("\n") else nl) + nl + new
 
 
 def _line_start(text, at):

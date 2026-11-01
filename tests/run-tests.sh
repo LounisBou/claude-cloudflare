@@ -1685,6 +1685,15 @@ check "every Caddy digest is under 150 lines" "" \
 check "the docs make at least ten digests and an index" "yes" \
   "$([ "$(ls "$ROOT"/docs/caddy/*.md | wc -l)" -ge 11 ] && echo yes || echo no)"
 
+echo "== Caddy: the Caddyfile parser =="
+
+# tests/caddyfile-cases.py: inline Caddyfiles through set and remove, one check per line.
+python3 "$ROOT/tests/caddyfile-cases.py" "$ENGINE" > "$WORK/cases" 2>"$WORK/cases.err"
+check "the parser's cases run to their end" "0 " "$? $(cat "$WORK/cases.err")"
+while IFS=$'\t' read -r name expected actual; do
+  check "$name" "$expected" "$actual"
+done < "$WORK/cases"
+
 echo "== Caddy: site writes =="
 
 caddy_reset
