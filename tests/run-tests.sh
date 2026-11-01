@@ -1727,7 +1727,7 @@ cdyw caddy-site-remove b.example.com
 check "…and is not removed either" "5" "$CODE"
 cdyw caddy-site-set '*.example.com' --body-file "$BODY"
 check "a wildcard host is refused with exit 5" "5" "$CODE"
-check "nothing refused was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+check "nothing refused for its addresses was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
 
 cdyw caddy-site-remove nothere.example.com
 check "removing a host with no block exits 2" "2" "$CODE"
@@ -1744,7 +1744,7 @@ check "a body that closes the block early exits 2" "2" "$CODE"
 printf '\n\n' > "$WORK/empty.caddy"
 cdyw caddy-site-set new.example.com --body-file "$WORK/empty.caddy"
 check "an empty body exits 2" "2" "$CODE"
-check "nothing refused was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+check "nothing refused for its host or its body was written, copied or run" "same 0 " "$(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
 
 printf 'example.com {\n\trespond "x"\n' > "$CADDYFILE"
 cdyw caddy-site-set new.example.com --body-file "$BODY"
@@ -1780,7 +1780,7 @@ caddy_reset
 printf 'fail adapting config using caddyfile: Caddyfile:50: unrecognized directive: revers_proxy\n' > "$CSTATE/validate"
 cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a validate failure exits 6" "6" "$CODE"
-check "…restores the Caddyfile byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
+check "…puts the Caddyfile back byte for byte" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
 check "…reloads nothing" "validate" "$(calls)"
 check "…and gives Caddy's error line and the copy" \
   "cf: caddy validate failed: Error: adapting config using caddyfile: Caddyfile:50: unrecognized directive: revers_proxy; the Caddyfile is restored; backup: $(ls "$CADDYFILE".bak-*)" \
@@ -1805,7 +1805,7 @@ cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "caddy still not alive after the rollback exits 7" "7" "$CODE"
 check "…the Caddyfile is restored all the same" "same" "$(same "$CADDYFILE" "$ORIGINAL")"
 check_contains "…and says to look now" "caddy is not alive after the rollback either" "$ERR"
-check_contains "…naming the copy" "backup: $CADDYFILE.bak-" "$ERR"
+check_contains "…naming the copy to put back" "backup: $CADDYFILE.bak-" "$ERR"
 
 caddy_reset
 printf '{"alive": false}\n' > "$CSTATE/reload"
@@ -1833,7 +1833,7 @@ caddy_reset
 printf '{"down": ["www.example.com"]}\n{"down": ["www.example.com"]}\n' > "$CSTATE/reload"
 cdyw caddy-reload
 check "caddy-reload with a host down after it exits 6 and names it as still down" "6" "$CODE"
-check_contains "…" "www.example.com went down after the reload; the Caddyfile is restored and reloaded, still down: www.example.com" "$ERR"
+check_contains "…the error names the host, the reload again and the host still down" "www.example.com went down after the reload; the Caddyfile is restored and reloaded, still down: www.example.com" "$ERR"
 
 caddy_reset
 mkdir -p "$CADDY/sudobin"
@@ -1859,7 +1859,7 @@ caddy_reset
 chmod 444 "$CADDYFILE"
 cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "a Caddyfile that cannot be written exits 4, unchanged, nothing run" "4 same " "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(calls)"
-check_contains "…naming the copy" "; nothing was changed; backup: $CADDYFILE.bak-" "$ERR"
+check_contains "…saying nothing was changed" "; nothing was changed; backup: $CADDYFILE.bak-" "$ERR"
 chmod 644 "$CADDYFILE"
 
 caddy_reset

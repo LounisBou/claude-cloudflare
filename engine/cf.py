@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cflib import (accounts, backup, backups, caddy, caddyctl, cache, certs, config, context, creds, dns,  # noqa: E402
+from cflib import (accounts, backup, backups, cache, caddy, caddyctl, certs, config, context, creds, dns,  # noqa: E402
                    errors, iprules, plan, protect, rulesets, security, settings, stdinjson, workers, zones)
 
 _MODULES = (accounts, zones, dns, backups, settings, certs, plan, rulesets, iprules, security, protect, cache, workers,

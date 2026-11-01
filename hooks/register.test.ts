@@ -284,6 +284,8 @@ test('caddy-site-remove and caddy-reload are writes, the Caddy reads are not ask
 
   for (const command of ['caddy-sites', 'caddy-site', 'caddy-status', 'caddy-docs']) await call($, command)
   expect(asked.length).toBe(0)
+  expect(runs.length).toBe(4)
+  expect(runs.every((r) => r.argv[1].endsWith('/engine/cf.py'))).toBe(true)
   await call($, 'caddy-site-remove', { host: 'old.example.com' })
   await call($, 'caddy-reload')
   expect(asked.map((q) => q.split(' with ')[0].split('. ').pop())).toEqual([

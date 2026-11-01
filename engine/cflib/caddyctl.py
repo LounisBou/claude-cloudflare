@@ -41,17 +41,17 @@ class Settings:
     """The caddy section of the config, checked: types, the manager, and an
     admin endpoint this engine can reach."""
 
-    def __init__(self, cfg):
-        data = cfg.caddy
+    def __init__(self, config):
+        data = config.caddy
         if not data:
-            raise errors.ConfigError("no caddy section in %s: the Caddy commands need one" % cfg.path)
+            raise errors.ConfigError("no caddy section in %s: the Caddy commands need one" % config.path)
 
         def value(key, kind=str, default=None):
             got = data.get(key)
             if got is None:
                 return default
             if not isinstance(got, kind):
-                raise errors.ConfigError("%s: caddy.%s must be a %s" % (cfg.path, key, kind.__name__))
+                raise errors.ConfigError("%s: caddy.%s must be a %s" % (config.path, key, kind.__name__))
             return got
 
         def path(key, default=None):
@@ -60,11 +60,11 @@ class Settings:
 
         self.manager = value("manager")
         if self.manager is not None and self.manager not in MANAGERS:
-            raise errors.ConfigError("%s: caddy.manager must be %s" % (cfg.path, " or ".join(MANAGERS)))
+            raise errors.ConfigError("%s: caddy.manager must be %s" % (config.path, " or ".join(MANAGERS)))
         self.binary = path("binary", "caddy")
         self.caddyfile = path("caddyfile")
         if not self.caddyfile:
-            raise errors.ConfigError("%s: caddy.caddyfile is not set" % cfg.path)
+            raise errors.ConfigError("%s: caddy.caddyfile is not set" % config.path)
         self.envfile = path("envfile")
         self.service = path("service")
         self.tls_snippet = value("tls_snippet")
@@ -72,7 +72,7 @@ class Settings:
         self.admin = value("admin", default=DEFAULT_ADMIN)
         if "/" in self.admin:
             raise errors.ConfigError("%s: caddy.admin must be host:port; an admin API on a unix socket "
-                                     "is not supported" % cfg.path)
+                                     "is not supported" % config.path)
 
     # ---- the Caddyfile ----
 
@@ -175,10 +175,10 @@ def error_line(output, command, code):
     return line if len(line) <= 400 else line[:399] + "…"
 
 
-def secrets(cfg):
+def secrets(config):
     """The envfile's values, to keep them out of any output. Never fails: an
     unreadable envfile or a malformed section has nothing to mask."""
-    envfile = cfg.caddy.get("envfile") if isinstance(cfg.caddy, dict) else None
+    envfile = config.caddy.get("envfile") if isinstance(config.caddy, dict) else None
     if not isinstance(envfile, str):
         return set()
     return {v for v in creds.read_env_file(envfile).values() if len(v) >= SECRET_MIN}
