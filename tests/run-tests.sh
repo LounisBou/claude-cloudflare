@@ -585,6 +585,9 @@ for rule in puts[-1]["body"]["rules"]:
 }
 # col <n>: the nth column of OUT's lines, the header dropped.
 col() { printf '%s\n' "$OUT" | sed 1d | cut -f"$1"; }
+# mark, then since_mark: the requests sent after the mark, one per line.
+mark() { MARK=$(sent | wc -l); }
+since_mark() { sent | tail -n +$((MARK + 1)); }
 
 reset
 cf settings example.com
@@ -649,6 +652,18 @@ cfw setting-set example.com ssl wrong
 check "a value the setting does not take exits 2" "2 cf: ssl takes off, flexible, full, strict" "$CODE $ERR"
 cfw setting-set example.com security_level under_attack
 check "setting-set leaves the security level to its own commands" "2" "$CODE"
+mark
+cfw setting-set example.com ../dns_records x
+check "a setting id carrying a path exits 2" "2 cf: ../dns_records is not a setting id (letters, digits and _)" "$CODE $ERR"
+check "a setting id carrying a path sends no request" "" "$(since_mark)"
+mark
+cfw setting-set example.com security_level/.. x
+check "a setting id cannot walk round the security level's refusal" "2 cf: security_level/.. is not a setting id (letters, digits and _)" "$CODE $ERR"
+check "a setting id walking round a refusal sends no request" "" "$(since_mark)"
+mark
+cf settings example.com ../dns_records
+check "settings refuses a setting id carrying a path" "2 cf: ../dns_records is not a setting id (letters, digits and _)" "$CODE $ERR"
+check "settings with a bad setting id sends no request" "" "$(since_mark)"
 cfw setting-set example.com challenge_ttl 900
 check "a number is sent as a number" "changed	challenge_ttl	1800	900" "$(printf '%s\n' "$OUT" | head -1)"
 cfwj '{"command": "setting-set", "args": {"zone": "example.com", "setting": "min_tls_version", "value": "1.3"}}'
@@ -658,6 +673,21 @@ cfw restore "$(backup_of)"
 check "restore puts a setting back" "restored	ssl	full" "$(printf '%s\n' "$OUT" | head -1)"
 cf settings example.com ssl
 check "the setting is back" "full" "$(col 2)"
+# A settings backup edited to name a setting id carrying a path.
+bad_set_bk="$WORK/backups/alpha/example.com/bad-setting.json"
+python3 - "$set_bk" "$bad_set_bk" <<'PYBK'
+import json, sys
+with open(sys.argv[1]) as fh:
+    saved = json.load(fh)
+saved["data"]["settings"] = {"../dns_records": "x"}
+saved["data"]["names"] = ["../dns_records"]
+with open(sys.argv[2], "w") as fh:
+    json.dump(saved, fh)
+PYBK
+mark
+cfw restore "$bad_set_bk"
+check "restore refuses a settings backup naming a bad setting id" "2 cf: ../dns_records is not a setting id (letters, digits and _)" "$CODE $ERR"
+check "restore of a bad setting id sends no request" "" "$(since_mark)"
 
 reset
 cfw universal-ssl example.com off

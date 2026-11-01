@@ -7,6 +7,7 @@ only, so that the emergency mode keeps its own permission ask.
 
 import argparse
 import json
+import re
 
 from . import backup, errors, fmt, zones
 
@@ -21,6 +22,16 @@ ENUMS = {
     "browser_check": ("on", "off"),
     "security_level": ("essentially_off", "low", "medium", "high", "under_attack"),
 }
+_ID = re.compile(r"[a-z0-9_]+")
+
+
+def setting_id(text):
+    """A setting id, lower-cased; refused before it reaches a path when it is
+    not one (a / or .. would reach any zone path)."""
+    setting = text.lower()
+    if not _ID.fullmatch(setting):
+        raise errors.UsageError("%s is not a setting id (letters, digits and _)" % text)
+    return setting
 
 
 def _path(zone, setting=None):
@@ -69,9 +80,10 @@ def apply(ctx, zone, setting, value):
 # ---- reads ----
 
 def settings(args, ctx):
+    setting = setting_id(args.setting) if args.setting else None
     zone = zones.find(ctx, args.zone)
-    if args.setting:
-        found = [ctx.api.get(_path(zone, args.setting.lower()))]
+    if setting:
+        found = [ctx.api.get(_path(zone, setting))]
     else:
         found = ctx.api.get(_path(zone)) or []
     if args.json:
@@ -83,11 +95,10 @@ def settings(args, ctx):
 # ---- writes ----
 
 def setting_set(args, ctx):
-    zone = zones.find(ctx, args.zone)
-    setting = args.setting.lower()
+    setting = setting_id(args.setting)
     if setting == "security_level":
         raise errors.UsageError("security_level is set with security-level, or under-attack for the emergency mode")
-    return apply(ctx, zone, setting, coerce(args.value))
+    return apply(ctx, zones.find(ctx, args.zone), setting, coerce(args.value))
 
 
 def _universal(zone):
@@ -111,6 +122,8 @@ def universal_ssl(args, ctx):
 def restore(ctx, saved):
     data = saved["data"]
     zone = {"id": data["zone_id"], "name": saved["zone"]}
+    for setting in data["settings"]:
+        setting_id(setting)
     changes = {}
     for setting, value in data["settings"].items():
         current = ctx.api.get(_path(zone, setting))["value"]
