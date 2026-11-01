@@ -94,10 +94,11 @@ def _set(ctx, args, mode):
     if existing and existing.get("mode") == mode:
         return line("unchanged", existing)
     path = save(ctx, zone, rules)
-    if existing:
-        done = ctx.api.patch(_path(zone, existing["id"]), {"mode": mode, "notes": args.note or existing.get("notes") or ""})
-        return "%s\n%s\nbackup: %s" % (line("before", existing), line("after", done), path)
-    done = ctx.api.post(_path(zone), {"mode": mode, "configuration": conf, "notes": args.note or "cf-plugin"})
+    with ctx.backup.naming(path):
+        if existing:
+            done = ctx.api.patch(_path(zone, existing["id"]), {"mode": mode, "notes": args.note or existing.get("notes") or ""})
+            return "%s\n%s\nbackup: %s" % (line("before", existing), line("after", done), path)
+        done = ctx.api.post(_path(zone), {"mode": mode, "configuration": conf, "notes": args.note or "cf-plugin"})
     return "%s\nbackup: %s" % (line("created", done), path)
 
 
@@ -118,9 +119,10 @@ def ip_rule_delete(args, ctx):
         raise errors.UsageError("no IP access rule %s in %s" % (args.rule, zone["name"]))
     path = save(ctx, zone, rules)
     lines = []
-    for rule in found:
-        ctx.api.delete(_path(zone, rule["id"]))
-        lines.append(line("deleted", rule))
+    with ctx.backup.naming(path):
+        for rule in found:
+            ctx.api.delete(_path(zone, rule["id"]))
+            lines.append(line("deleted", rule))
     return "\n".join(lines + ["backup: " + path])
 
 
@@ -139,14 +141,15 @@ def restore(ctx, saved):
         return []
     path = save(ctx, zone, current)
     lines = []
-    for rule in deletes:
-        ctx.api.delete(_path(zone, rule["id"]))
-        lines.append(line("deleted", rule))
-    for _, rule in patches:
-        lines.append(line("restored", ctx.api.patch(_path(zone, rule["id"]), {"mode": rule["mode"], "notes": rule.get("notes") or ""})))
-    for rule in posts:
-        made = ctx.api.post(_path(zone), {"mode": rule["mode"], "configuration": rule["configuration"], "notes": rule.get("notes") or ""})
-        lines.append(line("recreated", made))
+    with ctx.backup.naming(path):
+        for rule in deletes:
+            ctx.api.delete(_path(zone, rule["id"]))
+            lines.append(line("deleted", rule))
+        for _, rule in patches:
+            lines.append(line("restored", ctx.api.patch(_path(zone, rule["id"]), {"mode": rule["mode"], "notes": rule.get("notes") or ""})))
+        for rule in posts:
+            made = ctx.api.post(_path(zone), {"mode": rule["mode"], "configuration": rule["configuration"], "notes": rule.get("notes") or ""})
+            lines.append(line("recreated", made))
     return lines + ["backup: " + path]
 
 

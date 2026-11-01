@@ -61,7 +61,8 @@ def bot_fight(args, ctx):
         return "unchanged\tbot_fight_mode\t%s" % args.state
     data = {"zone_id": zone["id"], "names": ["bot_management"], _BOT_FIELD: current}
     path = ctx.backup.save(ctx.account, zone["name"], "bot", data)
-    ctx.api.put(_bot_path(zone), {_BOT_FIELD: wanted})
+    with ctx.backup.naming(path):
+        ctx.api.put(_bot_path(zone), {_BOT_FIELD: wanted})
     return "changed\tbot_fight_mode\t%s\t%s\nbackup: %s" % ("on" if current else "off", args.state, path)
 
 
@@ -74,7 +75,8 @@ def restore(ctx, saved):
         return []
     now = {"zone_id": zone["id"], "names": ["bot_management"], _BOT_FIELD: current}
     path = ctx.backup.save(ctx.account, zone["name"], "bot", now)
-    ctx.api.put(_bot_path(zone), {_BOT_FIELD: data[_BOT_FIELD]})
+    with ctx.backup.naming(path):
+        ctx.api.put(_bot_path(zone), {_BOT_FIELD: data[_BOT_FIELD]})
     return ["restored\tbot_fight_mode\t%s" % ("on" if data[_BOT_FIELD] else "off"), "backup: " + path]
 
 

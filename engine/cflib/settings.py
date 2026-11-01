@@ -72,7 +72,8 @@ def apply(ctx, zone, setting, value):
     if current == value:
         return "unchanged\t%s\t%s" % (setting, fmt._cell(_compact(value)))
     path = save(ctx, zone, {setting: current})
-    ctx.api.patch(_path(zone, setting), {"value": value})
+    with ctx.backup.naming(path):
+        ctx.api.patch(_path(zone, setting), {"value": value})
     return "changed\t%s\t%s\t%s\nbackup: %s" % (
         setting, fmt._cell(_compact(current)), fmt._cell(_compact(value)), path)
 
@@ -113,7 +114,8 @@ def universal_ssl(args, ctx):
         return "unchanged\tuniversal_ssl\t%s" % args.state
     data = {"zone_id": zone["id"], "names": ["universal_ssl"], "enabled": current}
     path = ctx.backup.save(ctx.account, zone["name"], "universal-ssl", data)
-    ctx.api.patch(_universal(zone), {"enabled": wanted})
+    with ctx.backup.naming(path):
+        ctx.api.patch(_universal(zone), {"enabled": wanted})
     return "changed\tuniversal_ssl\t%s\t%s\nbackup: %s" % (
         "on" if current else "off", args.state, path)
 
@@ -133,9 +135,10 @@ def restore(ctx, saved):
         return []
     path = save(ctx, zone, changes)
     lines = []
-    for setting in sorted(changes):
-        ctx.api.patch(_path(zone, setting), {"value": data["settings"][setting]})
-        lines.append("restored\t%s\t%s" % (setting, fmt._cell(_compact(data["settings"][setting]))))
+    with ctx.backup.naming(path):
+        for setting in sorted(changes):
+            ctx.api.patch(_path(zone, setting), {"value": data["settings"][setting]})
+            lines.append("restored\t%s\t%s" % (setting, fmt._cell(_compact(data["settings"][setting]))))
     return lines + ["backup: " + path]
 
 
@@ -147,7 +150,8 @@ def restore_universal(ctx, saved):
         return []
     now = {"zone_id": zone["id"], "names": ["universal_ssl"], "enabled": not data["enabled"]}
     path = ctx.backup.save(ctx.account, zone["name"], "universal-ssl", now)
-    ctx.api.patch(_universal(zone), {"enabled": data["enabled"]})
+    with ctx.backup.naming(path):
+        ctx.api.patch(_universal(zone), {"enabled": data["enabled"]})
     return ["restored\tuniversal_ssl\t%s" % ("on" if data["enabled"] else "off"), "backup: " + path]
 
 

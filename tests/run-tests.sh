@@ -1002,6 +1002,63 @@ check "a range with host bits set exits 2" "2 cf: 203.0.113.7/24 has host bits s
 check "a range with host bits set sends no write and takes no backup" "0 $taken_before" \
   "$(since_mark | grep -vc '^GET') $(backups_of example.com)"
 
+echo "== backups of the protection writes =="
+
+# backup_holds <backup> <state read before the write, as --json printed it>:
+# "same" when the backup file holds that state, else what it holds.
+backup_holds() {
+  python3 - "$1" "$2" <<'PYHOLDS'
+import json, os, sys
+path, before = sys.argv[1], json.loads(sys.argv[2])
+if not os.path.isfile(path):
+    sys.exit(print("no backup at " + path))
+with open(path) as fh:
+    data = json.load(fh)["data"]
+if "settings" in data:
+    held, read = data["settings"], {s["id"]: s["value"] for s in before}
+else:
+    held, read = data["rules"] or [], [{k: v for k, v in r.items() if k != "phase"} for r in before]
+print("same" if held == read else "differs: " + json.dumps(held, sort_keys=True))
+PYHOLDS
+}
+# backup_cycle <name> <method> <path suffix> <read command> -- <write command>:
+# the write once, its backup holding the state read before it; then again from
+# the same state with the write's own request failing: the backup was taken
+# first and the error ends with it.
+backup_cycle() {
+  local name="$1" method="$2" suffix="$3" read_command="$4" before failed_bk
+  shift 5
+  reset
+  cf $read_command --json
+  before="$OUT"
+  cfw "$@"
+  check "$name takes a backup of the state before it" "same" "$(backup_holds "$(backup_of)" "$before")"
+  reset
+  fail_next "$method" "$suffix" 400 9999 "refused by the fixture"
+  cfw "$@"
+  failed_bk="${ERR##*; backup: }"
+  check "$name failing on its write exits 3, its error ending with its backup" \
+    "3 cf: Cloudflare 9999: refused by the fixture; backup: $failed_bk" "$CODE $ERR"
+  check "$name failing on its write was backed up first" "same" "$(backup_holds "$failed_bk" "$before")"
+}
+
+backup_cycle rule-add PUT /rulesets/phases/http_request_firewall_custom/entrypoint "rules example.com --phase custom" -- \
+  rule-add example.com --expression '(ip.src.asn eq 64500)' --action block
+backup_cycle rule-update PUT /rulesets/phases/http_request_firewall_custom/entrypoint "rules example.com --phase custom" -- \
+  rule-update example.com da5b0a4d000000000000000000000c01 --description renamed
+backup_cycle rate-limit PUT /rulesets/phases/http_ratelimit/entrypoint "rules example.org --phase ratelimit" -- \
+  rate-limit www.example.org --requests 5
+backup_cycle managed-rules PUT /rulesets/phases/http_request_firewall_managed/entrypoint "rules example.org --phase managed" -- \
+  managed-rules example.org on
+backup_cycle ip-block POST /firewall/access_rules/rules "ip-rules example.com" -- \
+  ip-block example.com 203.0.113.0/24
+backup_cycle ip-allow PATCH /firewall/access_rules/rules/da5b0a4d000000000000000000000i01 "ip-rules example.com" -- \
+  ip-allow example.com 198.51.100.7
+backup_cycle security-level PATCH /settings/security_level "settings example.com security_level" -- \
+  security-level example.com high
+backup_cycle under-attack PATCH /settings/security_level "settings example.com security_level" -- \
+  under-attack example.com on
+
 echo "== end to end: a protection cycle on a Free zone at its quota =="
 
 # example.edu is Free and holds four dashboard rules of its five slots.

@@ -107,7 +107,9 @@ Prints `deleted` and the record's columns. Asked every time.
 
 Before every zone write, the records of the names it touches are saved to
 `backup_dir/<account>/<zone>/<UTC timestamp>-<kind>.json` (mode 600). A
-backup that cannot be written stops the write.
+backup that cannot be written stops the write. When a settings, ruleset, IP
+access rule or Bot Fight Mode write fails after its backup, its error ends
+with `; backup: <path>`.
 
 ### `backups [--zone Z]` (read)
 

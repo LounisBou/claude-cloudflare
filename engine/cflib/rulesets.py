@@ -58,7 +58,8 @@ def write(ctx, zone, phase, entry, rules):
     """Save the entrypoint, then put the whole list of rules back. Returns
     the backup's path and the entrypoint as Cloudflare now holds it."""
     path = save(ctx, zone, phase, entry)
-    done = ctx.api.put(_path(zone, phase), {"rules": [body(r) for r in rules]})
+    with ctx.backup.naming(path):
+        done = ctx.api.put(_path(zone, phase), {"rules": [body(r) for r in rules]})
     return path, done
 
 
