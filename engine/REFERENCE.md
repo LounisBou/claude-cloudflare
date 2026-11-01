@@ -393,7 +393,8 @@ every top-level block, global options and snippets included, with `kind`,
 ### `caddy-site <host>` (read)
 
 The block serving the host, as written: the one naming it, else the wildcard
-blocks covering it. No such block: exit 2.
+blocks covering it. A wildcard (`*.example.com`) names its own block. No such
+block: exit 2.
 
 ### `caddy-status` (read)
 

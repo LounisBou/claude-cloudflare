@@ -1578,6 +1578,8 @@ cdy caddy-site b.example.com
 check "caddy-site finds a host in a block of several" "$(sed -n 34,37p "$ORIGINAL")" "$OUT"
 cdy caddy-site zz.example.com
 check "caddy-site serves a host covered by a wildcard from the wildcard's block" "$(sed -n 39,42p "$ORIGINAL")" "$OUT"
+cdy caddy-site '*.example.com'
+check "caddy-site reads a wildcard block by its address" "$(sed -n 39,42p "$ORIGINAL")" "$OUT"
 cdy caddy-site nothere.example.org
 check "caddy-site on a host with no block exits 2" "2" "$CODE"
 check_contains "…naming the Caddyfile" "cf: no site block for nothere.example.org in $CADDYFILE" "$ERR"

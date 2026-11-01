@@ -39,7 +39,7 @@ def caddy_sites(args, ctx):
 
 
 def caddy_site(args, ctx):
-    host = caddyfile.host_name(args.host)
+    host = caddyfile.host_name(args.host, wildcard=True)
     settings = caddyctl.Settings(ctx.config)
     text = settings.read()
     blocks, _ = caddyfile.parse(text)

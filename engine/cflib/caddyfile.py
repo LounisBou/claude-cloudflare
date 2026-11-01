@@ -201,17 +201,19 @@ def hosts(blocks):
     return sorted(found)
 
 
-def host_name(raw):
+def host_name(raw, wildcard=False):
     """A host as the commands take it: case and an https:// prefix ignored.
-    A wildcard is refused (exit 5): its block cannot be named without
-    ambiguity; anything else that is not a DNS name is a usage error."""
+    A wildcard ("*.example.com") is taken only where wildcard is true (a
+    read); elsewhere it is refused (exit 5): its block cannot be named without
+    ambiguity. Anything else that is not a DNS name is a usage error."""
     host = raw.strip().lower()
     if host.startswith("https://"):
         host = host[len("https://"):]
     host = host.rstrip(".")
-    if "*" in host:
+    name = host[2:] if wildcard and host.startswith("*.") else host
+    if "*" in name:
         raise errors.Refused("%s is a wildcard: a wildcard block is edited by hand" % raw)
-    if not _HOST.match(host) or len(host) > 253:
+    if not _HOST.match(name) or len(host) > 253:
         raise errors.UsageError("%s is not a host name" % raw)
     return host
 
@@ -219,7 +221,8 @@ def host_name(raw):
 def serving(blocks, host):
     """The site blocks that serve the host: those naming it, else the
     wildcard ones covering it. For reading only."""
-    named = [b for b in blocks if b.kind == "site" and host in map(site_host, b.addresses)]
+    named = [b for b in blocks if b.kind == "site" and (
+        host in map(site_host, b.addresses) or host in (a.lower().split("://", 1)[-1] for a in b.addresses))]
     return named or [b for b in blocks if b.kind == "site" and any(_covers(a, host) for a in b.addresses)]
 
 
