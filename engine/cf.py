@@ -16,10 +16,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cflib import (accounts, backup, backups, cache, certs, config, context, creds, dns, errors, iprules, plan,  # noqa: E402
-                   protect, rulesets, security, settings, stdinjson, workers, zones)
+from cflib import (accounts, backup, backups, cache, caddy, caddyctl, certs, config, context, creds, dns,  # noqa: E402
+                   errors, iprules, plan, protect, rulesets, security, settings, stdinjson, workers, zones)
 
-_MODULES = (accounts, zones, dns, backups, settings, certs, plan, rulesets, iprules, security, protect, cache, workers)
+_MODULES = (accounts, zones, dns, backups, settings, certs, plan, rulesets, iprules, security, protect, cache, workers,
+            caddy)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -107,7 +108,8 @@ def main(argv, writes=False):
                 raise errors.UsageError("stdin is not valid JSON: %s" % exc)
             argv = stdinjson.build_argv(build_parser(), request)
         try:
-            secrets = creds.secrets(config.load_config().env_files)
+            cfg = config.load_config()
+            secrets = creds.secrets(cfg.env_files) | caddyctl.secrets(cfg)
         except errors.CfError:
             secrets = creds.secrets([])
         out = run(argv, writes)

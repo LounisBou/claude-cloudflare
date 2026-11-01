@@ -15,6 +15,8 @@ export const COMMANDS = [
   'cache-rules', 'workers', 'worker-routes',
   'cache-rule-add', 'cache-rule-delete', 'purge', 'purge-all', 'worker-deploy', 'worker-delete',
   'worker-route-add', 'worker-route-delete', 'worker-domain-add',
+  'caddy-sites', 'caddy-site', 'caddy-status', 'caddy-docs',
+  'caddy-site-set', 'caddy-site-remove', 'caddy-reload',
 ]
 
 // The commands that only read. Every other one writes to Cloudflare, and a
@@ -23,6 +25,7 @@ export const READS = new Set([
   'auth-check', 'accounts', 'zones', 'dns-list', 'dns-get', 'dns-export', 'backups',
   'settings', 'certs', 'plan', 'rules', 'ip-rules', 'security',
   'cache-rules', 'workers', 'worker-routes',
+  'caddy-sites', 'caddy-site', 'caddy-status', 'caddy-docs',
 ])
 
 // The writes no session grant covers, asked each time: a deletion, a replay
@@ -98,7 +101,13 @@ async function ask($: any, question: string, options: string[], command: string)
   return 'the user refused cf ' + command
 }
 
+// The Caddy commands act on this machine's Caddy, whatever the account.
+function isCaddy(command: string): boolean {
+  return command.startsWith('caddy-')
+}
+
 function where(e: any): string {
+  if (isCaddy(e.command)) return 'the local Caddy'
   return e.account ? 'account ' + String(e.account).toLowerCase() : 'the default account'
 }
 
@@ -120,12 +129,13 @@ function describe(e: any): string {
   const named = NAMED.filter((k) => args[k] !== undefined && args[k] !== null)
     .map((k) => k + ' ' + (typeof args[k] === 'string' ? args[k] : JSON.stringify(args[k])))
   const detail = JSON.stringify(Object.fromEntries(Object.entries(args).filter(([k]) => !NAMED.includes(k))))
-  return 'Run cf ' + e.command + ' on ' + where(e) + named.map((n) => ', ' + n).join('') + ' with '
+  const host = isCaddy(e.command) && typeof args.host === 'string' ? ' for ' + args.host : ''
+  return 'Run cf ' + e.command + ' on ' + where(e) + host + named.map((n) => ', ' + n).join('') + ' with '
     + (detail.length > 200 ? detail.slice(0, 199) + '…' : detail)
 }
 
 // A grant is the session's, the command's, the account's (named or the
-// default one) and the zone's.
+// default one) and the zone's; for a Caddy command, the local Caddy's.
 async function grantKey($: any, e: any): Promise<string | undefined> {
   try {
     const session = await $.session.id()
@@ -170,7 +180,9 @@ export function register(on: any): void {
       description:
         'Cloudflare API: accounts by name, zones, DNS records (list, get, export, '
         + 'create, update, delete), the backups taken before every write and their '
-        + 'restore. Before first use, Read ' + root + '/engine/REFERENCE.md for every '
+        + 'restore; and the local Caddy: site blocks of the Caddyfile, set or removed '
+        + 'through validate, reload and rollback, with digests of the Caddy docs '
+        + '(caddy-docs). Before first use, Read ' + root + '/engine/REFERENCE.md for every '
         + 'command. Pass positionals by their documented name (dns-get: {"zone": '
         + '"example.com", "record": "www"}); other keys become --flags. Output is '
         + 'compact text; "json": true on a read gives full objects.',

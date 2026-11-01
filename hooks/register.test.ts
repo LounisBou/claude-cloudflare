@@ -258,6 +258,43 @@ test('a write that needs permission is refused when nobody can be asked', async 
   expect(runs.length).toBe(0)
 })
 
+test('a Caddy write is asked on the local Caddy, its host shown before any truncation', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  stubAsk(on, asked, 'Allow for this session')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'caddy-site-set', { 'body-file': '/work/' + 'b'.repeat(300) + '.caddy', host: 'app.example.com' }, 'alpha')
+  await call($, 'caddy-site-set', { host: 'api.example.com', 'body-file': '/work/api.caddy' })
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('every later cf caddy-site-set on the local Caddy until')
+  expect(asked[0]).toContain('Run cf caddy-site-set on the local Caddy for app.example.com with ')
+  expect(asked[0]).not.toContain('account')
+  expect(runs.length).toBe(2)
+  expect(runs[0].argv[1].endsWith('/engine/cf-write.py')).toBe(true)
+})
+
+test('caddy-site-remove and caddy-reload are writes, the Caddy reads are not asked', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  stubAsk(on, asked, 'Allow')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  for (const command of ['caddy-sites', 'caddy-site', 'caddy-status', 'caddy-docs']) await call($, command)
+  expect(asked.length).toBe(0)
+  expect(runs.length).toBe(4)
+  expect(runs.every((r) => r.argv[1].endsWith('/engine/cf.py'))).toBe(true)
+  await call($, 'caddy-site-remove', { host: 'old.example.com' })
+  await call($, 'caddy-reload')
+  expect(asked.map((q) => q.split(' with ')[0].split('. ').pop())).toEqual([
+    'Run cf caddy-site-remove on the local Caddy for old.example.com',
+    'Run cf caddy-reload on the local Caddy',
+  ])
+  expect(runs.length).toBe(6)
+})
+
 // ---- « Allow for this session » ----
 
 test('« Allow for this session » runs the call and every later one of that command on that account', async ($, on) => {

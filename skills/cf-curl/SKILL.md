@@ -4,7 +4,7 @@ description: |
   Use when making Cloudflare API calls and the mcp__cloudflare__cf tool is not
   in the tool list (a session where mods do not load: claude -p, an older
   Claude Code). Runs the same Python standard-library engine from Bash:
-  accounts, zones, DNS records, zone settings, certificates, protections (rules, rate limiting, managed rules, IP access rules), backups and restore.
+  accounts, zones, DNS records, zone settings, certificates, protections (rules, rate limiting, managed rules, IP access rules), backups and restore, and the local Caddy (site blocks, validate, reload, rollback, docs digests).
   WHEN: a Cloudflare call is needed and mcp__cloudflare__cf is unavailable.
   WHEN NOT: mcp__cloudflare__cf is available (use it).
 ---
@@ -34,3 +34,7 @@ and never print one.
 
 Every write saves the records it touches first and ends with `backup: <path>`;
 `python3 "$CFW" restore <path>` replays it.
+
+The Caddy writes (`caddy-site-set`, `caddy-site-remove`, `caddy-reload`) copy
+the Caddyfile first, validate, reload and probe every site, and put the copy
+back themselves when anything breaks (exit 6 or 7).
