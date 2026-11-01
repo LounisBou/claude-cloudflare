@@ -5,7 +5,8 @@ It keeps its state in memory, answers in Cloudflare's envelope
 ({"success", "errors", "result", "result_info"}) and pages its lists. Each
 token sees its own accounts and zones, read from tests/fixtures/state.json.
 Requests are logged (method, path, query, body) for the suite to assert on;
-headers, and so tokens, are never logged.
+headers, and so tokens, are never logged but for a multipart body's
+Content-Type, kept with the raw body beside its parsed parts.
 
 Control endpoints, outside the API: POST /__reset restores the initial state
 and empties the log, GET /__log returns the log, POST /__fail makes the next
@@ -13,6 +14,13 @@ request matching {"method", "path"} answer {"status", "code", "message"},
 or, given {"location"} instead, answer {"status"} with that Location header,
 or, given {"raw"}, write those bytes as the whole answer. POST /__pages
 {"total_pages"} makes every list claim that many pages until the next reset.
+            return self._send(200, {"ok": True})
+GET /__state returns the scripts and custom domains as the server holds them,
+POST /__script stores a script as given (state.json's shape).
+
+A module script's content is answered as multipart/form-data with the main
+module named by a cf-entrypoint header, a service-worker script's (body_part)
+as plain text, as Cloudflare does.
 
     server.py <state.json> <port file>   binds 127.0.0.1 on a free port
 """
@@ -32,6 +40,10 @@ PROXIABLE = ("A", "AAAA", "CNAME")
 PHASES = ("http_request_firewall_custom", "http_ratelimit", "http_request_firewall_managed",
           "http_request_cache_settings")
 PURGE_KEYS = ("files", "hosts", "prefixes", "tags", "purge_everything")
+MODULE_TYPE = "application/javascript+module"
+SCRIPT_TYPE = "application/javascript"
+# What a script holds that the list of scripts does not show.
+INTERNAL = ("content", "bindings", "main_module", "body_part", "extra_parts", "no_entrypoint")
 DEFAULT_SETTINGS = {
     "ssl": "full", "min_tls_version": "1.2", "tls_1_3": "on", "always_use_https": "off",
     "security_level": "medium", "browser_check": "on", "challenge_ttl": 1800,
@@ -89,8 +101,8 @@ class State:
             rule = dict(rule)
             rule.setdefault("id", uuid.uuid4().hex)
             rule.setdefault("enabled", True)
-            rule["version"] = "1"
-            rule["last_updated"] = "2026-01-01T00:00:00Z"
+            rule.setdefault("version", "1")
+            rule.setdefault("last_updated", "2026-01-01T00:00:00Z")
             stored.append(rule)
         self.rulesets[zid][phase] = {
             "id": old["id"] if old else uuid.uuid4().hex, "name": "default", "kind": "zone",
@@ -140,10 +152,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def _send(self, status, body, text=False):
+    def _send(self, status, body, text=False, headers=None):
         raw = body.encode() if text else json.dumps(body).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain" if text else "application/json")
+        headers = dict({"Content-Type": "text/plain" if text else "application/json"}, **(headers or {}))
+        for name, value in headers.items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -167,7 +181,8 @@ class Handler(BaseHTTPRequestHandler):
                 {"name": part.get_param("name", header="content-disposition"),
                  "filename": part.get_filename(), "content_type": part.get_content_type(),
                  "content": part.get_payload(decode=True).decode()}
-                for part in message.get_payload()]}
+                for part in message.get_payload()],
+                "__content_type": ctype, "__raw": raw.decode(errors="replace")}
         try:
             return json.loads(raw)
         except ValueError:
@@ -189,6 +204,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if url.path == "/__pages":
             state.total_pages = body["total_pages"]
+            return self._send(200, {"ok": True})
+        if url.path == "/__state":
+            return self._send(200, {"scripts": state.scripts, "domains": state.domains})
+        if url.path == "/__script":
+            state.scripts[body["id"]] = dict(body)
             return self._send(200, {"ok": True})
 
         state.log.append({"method": method, "path": url.path, "query": query, "body": body})
@@ -214,6 +234,9 @@ class Handler(BaseHTTPRequestHandler):
             status, result = self.route(state, who, method, parts, query, body)
         except Problem as exc:
             return self._send(exc.status, failure(exc.code, exc.message))
+        if isinstance(result, tuple):
+            text, headers = result
+            return self._send(status, text, text=True, headers=headers)
         if isinstance(result, str):
             return self._send(status, result, text=True)
         return self._send(status, result)
@@ -336,20 +359,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def workers_route(self, state, account, method, parts, query, body):
         if parts == ["scripts"] and method == "GET":
-            return 200, page(state, [{k: v for k, v in s.items() if k != "content"}
-                                     for s in state.scripts.values() if s["account"] == account], query)
+            return 200, page(state, [listed(s) for s in state.scripts.values() if s["account"] == account], query)
         if len(parts) == 2 and parts[0] == "scripts" and method == "PUT":
             sent = {p["name"]: p for p in (body or {}).get("__multipart", [])}
             if "metadata" not in sent:
                 raise Problem(400, 10021, "metadata part is required")
+            if sent["metadata"]["content_type"] != "application/json":
+                raise Problem(400, 10021, "the metadata part must be application/json")
             meta = json.loads(sent["metadata"]["content"])
-            main = meta.get("main_module")
+            # A module Worker names its main module, a service-worker one its body part.
+            kind = "main_module" if "main_module" in meta else "body_part"
+            main = meta.get(kind)
             if main not in sent:
-                raise Problem(400, 10021, "main_module %s is not a part" % main)
+                raise Problem(400, 10021, "%s %s is not a part" % (kind, main))
+            wanted = MODULE_TYPE if kind == "main_module" else SCRIPT_TYPE
+            if sent[main]["content_type"] != wanted or not sent[main]["filename"]:
+                raise Problem(400, 10021, "the %s part must be %s with a filename" % (kind, wanted))
+            old = state.scripts.get(parts[1]) or {}
+            kept = [b for b in old.get("bindings", []) if b["type"] in meta.get("keep_bindings", [])]
             state.scripts[parts[1]] = {
-                "id": parts[1], "account": account, "content": sent[main]["content"],
-                "compatibility_date": meta.get("compatibility_date"), "modified_on": "2026-01-01T00:00:00Z"}
-            return 200, envelope({k: v for k, v in state.scripts[parts[1]].items() if k != "content"})
+                "id": parts[1], "account": account, kind: main, "content": sent[main]["content"],
+                "bindings": meta.get("bindings", []) + kept,
+                "compatibility_date": meta.get("compatibility_date"),
+                "compatibility_flags": meta.get("compatibility_flags", []), "modified_on": "2026-01-01T00:00:00Z"}
+            return 200, envelope(listed(state.scripts[parts[1]]))
         if len(parts) >= 2 and parts[0] == "scripts":
             script = state.scripts.get(parts[1])
             if script is None or script["account"] != account:
@@ -456,6 +489,28 @@ class Problem(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+
+def listed(script):
+    """A script as the list of scripts shows it: no content, no bindings."""
+    return {k: v for k, v in script.items() if k not in INTERNAL}
+
+
+def content(script):
+    """content/v2's answer: (body, headers). A module script is a form of its
+    main module and its other parts, unless no_entrypoint drops the header."""
+    if "main_module" not in script:
+        return script["content"], {}
+    boundary = uuid.uuid4().hex
+    parts = [{"name": script["main_module"], "content_type": MODULE_TYPE, "content": script["content"]}]
+    out = []
+    for part in parts + script.get("extra_parts", []):
+        out.append('--%s\r\nContent-Disposition: form-data; name="%s"; filename="%s"\r\nContent-Type: %s\r\n\r\n%s\r\n'
+                   % (boundary, part["name"], part["name"], part["content_type"], part["content"]))
+    headers = {"Content-Type": "multipart/form-data; boundary=" + boundary}
+    if not script.get("no_entrypoint"):
+        headers["cf-entrypoint"] = script["main_module"]
+    return "".join(out) + "--%s--\r\n" % boundary, headers
 
 
 def page(state, items, query):
