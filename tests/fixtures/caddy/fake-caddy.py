@@ -12,7 +12,8 @@ call, in the files "validate" and "reload" of the same directory:
     reload:   "fail <message>" fails the same way; a JSON object is an effect
               applied to the world after the reload: {"down": [hosts]} stops
               answering for those hosts, {"status": {host: code}} changes their
-              status, {"alive": false} stops the whole server.
+              status, {"alive": false} stops the whole server, {"sleep": s}
+              waits s seconds first.
 
 A reload with no effect queued makes the world serve every https site of the
 Caddyfile it was given: the hosts of the blocks whose address line starts at
@@ -87,12 +88,13 @@ def main(argv):
         step = pop("reload")
         if step.startswith("fail "):
             fail(step)
+        effect = json.loads(step) if step else {}
+        time.sleep(effect.get("sleep", 0))
         world_path = os.path.join(STATE, "world.json")
         with open(world_path, encoding="utf-8") as fh:
             before = json.load(fh)
         world = {"alive": True, "sites": {h: before["sites"].get(h, 200) for h in hosts(config)}}
         if step:
-            effect = json.loads(step)
             world["alive"] = effect.get("alive", True)
             for host in effect.get("down", []):
                 world["sites"].pop(host, None)

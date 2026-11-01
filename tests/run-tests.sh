@@ -1982,6 +1982,29 @@ check "a Caddyfile that cannot be put back after a reload exits 4, not 7" "4" "$
 check_contains "…saying caddy runs the reloaded config" \
   "the Caddyfile could not be restored (Permission denied): caddy runs the changed Caddyfile; put $CADDYFILE.bak-" "$ERR"
 
+check "the cycle's budget stays under the mod's timeout for a call" "yes" \
+  "$(python3 - "$ENGINE" "$ROOT/hooks/register.ts" <<'PYBUDGET'
+import re, sys
+sys.path.insert(0, sys.argv[1])
+from cflib import caddyctl
+ms = min(int(t.replace("_", "")) for t in re.findall(r"timeoutMs: ([0-9_]+)", open(sys.argv[2]).read()))
+print("yes" if caddyctl.BUDGET * 1000 < ms else "no: %s s against %d ms" % (caddyctl.BUDGET, ms))
+PYBUDGET
+)"
+caddy_reset
+printf '{"sleep": 30}\n' > "$CSTATE/reload"
+started=$(date +%s)
+CADDY_EXTRA="CF_CADDY_BUDGET=4" cdyw caddy-site-set new.example.com --body-file "$BODY"
+took=$(( $(date +%s) - started ))
+check "a reload that outlasts the cycle's budget is rolled back: exit 6, the Caddyfile restored" "6 same" \
+  "$CODE $(same "$CADDYFILE" "$ORIGINAL")"
+check_contains "…the error says the budget ran out" \
+  "cf: caddy reload failed: caddy reload did not end within" "$ERR"
+check_contains "…past the budget" "past the cycle's budget of 4 seconds; the Caddyfile is restored and reloaded" "$ERR"
+check "…the rollback validated and reloaded the restored file" "validate reload validate reload" "$(calls)"
+check "…and the whole cycle ended within the budget, not the reload's 30 seconds" "yes" \
+  "$([ "$took" -le 5 ] && echo yes || echo "no: $took s")"
+
 check "no stop, restart or service command anywhere in the engine" "" \
   "$(grep -rnE 'brew services|systemctl (re)?start|systemctl stop|launchctl|caddy stop|"stop"|"restart"' "$ENGINE" 2>/dev/null)"
 

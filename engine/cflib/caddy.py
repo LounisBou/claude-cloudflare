@@ -8,7 +8,9 @@ admin API answers; probe every site again. A site that answered and no longer
 does, a failed reload or a dead admin API put the copy back, validate and
 reload it, and probe again: exit 6, or 7 when Caddy is still not alive. Any
 other exception once the file is written, SIGTERM included, puts the copy back
-before it goes on; a copy that cannot be put back is exit 4. The Caddyfile is
+before it goes on; a copy that cannot be put back is exit 4. The cycle has
+one deadline: each step takes its time from what is left, a step past it is a
+failure the rollback takes back, in the time kept for it. The Caddyfile is
 the only source of truth: nothing is written through the admin
 API, and Caddy is never stopped or restarted.
 """
@@ -143,6 +145,8 @@ def _put_back(settings, original, copy, reason, reloaded):
 def _rollback(settings, variables, original, copy, hosts, broken, reason):
     """Put the copy back, validate and reload it, probe again; raise
     RolledBack, or NotAlive when Caddy still does not answer."""
+    settings.deadline.rolling_back = True
+    reason = _late(settings, reason)
     _put_back(settings, original, copy, reason, True)
     done = "the Caddyfile is restored"
     ok, line = settings.validate(variables)
@@ -152,7 +156,7 @@ def _rollback(settings, variables, original, copy, hosts, broken, reason):
         ok, line = settings.reload(variables)
         done += " and reloaded" if ok else ", but its reload failed (%s)" % line
     alive = settings.alive()
-    again = caddyctl.probe(hosts)
+    again = caddyctl.probe(hosts, settings)
     still = [h for h in broken if again.get(h) is caddyctl.DOWN]
     if still:
         done += ", still down: " + ", ".join(still)
@@ -160,6 +164,13 @@ def _rollback(settings, variables, original, copy, hosts, broken, reason):
         raise errors.NotAlive("%s; %s, but caddy is not alive after the rollback either: look at it now; backup: %s"
                               % (reason, done, copy))
     raise errors.RolledBack("%s; %s; backup: %s" % (reason, done, copy))
+
+
+def _late(settings, reason):
+    """The reason, saying so when the cycle's steps have used up their time."""
+    if settings.deadline.passed():
+        return "%s, past the cycle's budget of %g seconds" % (reason, settings.deadline.budget)
+    return reason
 
 
 def _terminated(signum, frame):
@@ -180,6 +191,7 @@ def cycle(ctx, edit, host=None, removing=False):
 
 def _cycle(ctx, edit, host, removing):
     settings = caddyctl.Settings(ctx.config)
+    settings.deadline = caddyctl.Deadline()
     variables = settings.variables()
     original = settings.read()
     blocks, loose = caddyfile.parse(original)
@@ -192,7 +204,10 @@ def _cycle(ctx, edit, host, removing):
         raise errors.Refused("caddy's admin API does not answer at %s: a reload cannot be checked, "
                              "nor taken back; nothing was changed" % settings.admin)
     copy = settings.copy(original)
-    before = caddyctl.probe(hosts)
+    before = caddyctl.probe(hosts, settings)
+    if settings.deadline.passed():
+        raise errors.Refused("the sites took the cycle's budget of %g seconds to probe; nothing was changed; "
+                             "backup: %s" % (settings.deadline.budget, copy))
     try:
         settings.write(new)
     except OSError as exc:
@@ -203,7 +218,7 @@ def _cycle(ctx, edit, host, removing):
     try:
         ok, line = settings.validate(variables)
         if not ok:
-            reason = "caddy validate failed: %s" % line
+            reason = _late(settings, "caddy validate failed: %s" % line)
             _put_back(settings, original, copy, reason, False)
             raise errors.RolledBack("%s; the Caddyfile is restored; backup: %s" % (reason, copy))
         reloaded = True
@@ -213,7 +228,7 @@ def _cycle(ctx, edit, host, removing):
         if not settings.alive():
             _rollback(settings, variables, original, copy, hosts, [],
                       "caddy's admin API did not answer after the reload")
-        after = caddyctl.probe(hosts)
+        after = caddyctl.probe(hosts, settings)
         broken = [h for h in hosts if before[h] is not caddyctl.DOWN and after[h] is caddyctl.DOWN
                   and not (removing and h == host)]
         if broken:

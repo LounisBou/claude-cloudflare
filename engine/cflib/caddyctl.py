@@ -19,6 +19,7 @@ import signal
 import socket
 import ssl
 import subprocess
+import time
 import urllib.error
 import urllib.request
 
@@ -31,6 +32,13 @@ DEFAULT_ADMIN = "localhost:2019"
 PROBE = "127.0.0.1:443"
 PROBE_TIMEOUT = 5
 CALL_TIMEOUT = 60
+# A whole cycle (validate, reload, the probes, a rollback) stays within BUDGET
+# seconds, under the mod's 120 s for a call. Its steps stop when RESERVE of it
+# is left, which the rollback keeps; a rollback step always gets ROLLBACK_MIN.
+# CF_CADDY_BUDGET overrides it, which is how the suite tries a short one.
+BUDGET = 100
+RESERVE = 0.4
+ROLLBACK_MIN = 1
 # An envfile value shorter than this is no secret worth masking ("1", "info").
 SECRET_MIN = 8
 _STAMP = "%Y%m%dT%H%M%S.%fZ"
@@ -41,6 +49,25 @@ _UNSAFE = re.compile(r"^(?:PATH|LD_.*|DYLD_.*)$")
 DOWN = None
 # A site whose TLS handshake completes but which sends no HTTP line in time: it answers.
 NO_HTTP = "no-http"
+
+
+class Deadline:
+    """The time a cycle has, from its start."""
+
+    def __init__(self):
+        self.budget = float(os.environ.get("CF_CADDY_BUDGET") or BUDGET)
+        self.end = time.monotonic() + self.budget
+        self.steps_end = self.end - self.budget * RESERVE
+        self.rolling_back = False
+
+    def passed(self):
+        return time.monotonic() >= self.steps_end
+
+    def timeout(self, default):
+        """A step's timeout: its own, cut to what is left."""
+        if self.rolling_back:
+            return max(ROLLBACK_MIN, min(default, self.end - time.monotonic()))
+        return min(default, self.steps_end - time.monotonic())
 
 
 class Settings:
@@ -76,9 +103,14 @@ class Settings:
         self.tls_snippet = value("tls_snippet")
         self.sudo = value("sudo", bool, False)
         self.admin = value("admin", default=DEFAULT_ADMIN)
+        # Set by a cycle: every call and probe is then cut to the time it has left.
+        self.deadline = None
         if "/" in self.admin:
             raise errors.ConfigError("%s: caddy.admin must be host:port; an admin API on a unix socket "
                                      "is not supported" % config.path)
+
+    def timeout(self, default):
+        return self.deadline.timeout(default) if self.deadline else default
 
     # ---- the Caddyfile ----
 
@@ -161,11 +193,12 @@ class Settings:
         except OSError as exc:
             # A failure like any other: after an edit, the cycle puts the copy back.
             return False, "cannot run %s: %s" % (argv[0], exc.strerror)
+        timeout = max(0, self.timeout(CALL_TIMEOUT))
         try:
-            out, err = proc.communicate(timeout=CALL_TIMEOUT)
+            out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill(proc)
-            return False, "caddy %s did not end within %d seconds" % (args[0], CALL_TIMEOUT)
+            return False, "caddy %s did not end within %g seconds" % (args[0], round(timeout, 1))
         except BaseException:
             _kill(proc)
             raise
@@ -189,8 +222,11 @@ class Settings:
         """Whether the admin API answers GET /config/ with 200. The answer,
         which may hold secrets, is read and dropped."""
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        timeout = self.timeout(PROBE_TIMEOUT)
+        if timeout <= 0:
+            return False
         try:
-            with opener.open("http://%s/config/" % self.admin, timeout=PROBE_TIMEOUT) as resp:
+            with opener.open("http://%s/config/" % self.admin, timeout=timeout) as resp:
                 resp.read()
                 return resp.status == 200
         except (urllib.error.URLError, OSError, ValueError):
@@ -248,7 +284,7 @@ def _probe_address():
     return host, int(port)
 
 
-def probe_one(host, address):
+def probe_one(host, address, timeout=PROBE_TIMEOUT):
     """The HTTP status the site answers at the address with SNI = host;
     NO_HTTP when the TLS handshake completes but no HTTP line comes; DOWN
     only when the connection or the TLS handshake fails. The certificate is
@@ -258,8 +294,10 @@ def probe_one(host, address):
     context.verify_mode = ssl.CERT_NONE
     context.set_alpn_protocols(["http/1.1"])
     request = "HEAD / HTTP/1.1\r\nHost: %s\r\nUser-Agent: claude-cloudflare\r\nConnection: close\r\n\r\n" % host
+    if timeout <= 0:
+        return DOWN
     try:
-        raw = socket.create_connection(address, timeout=PROBE_TIMEOUT)
+        raw = socket.create_connection(address, timeout=timeout)
     except (OSError, ValueError):
         return DOWN
     with raw:
@@ -277,13 +315,18 @@ def probe_one(host, address):
     return int(match.group(1)) if match else NO_HTTP
 
 
-def probe(hosts):
-    """{host: status or DOWN} for every host, probed side by side."""
+def probe(hosts, settings=None):
+    """{host: status or DOWN} for every host, probed side by side, each
+    within the time the settings' cycle has left."""
     address = _probe_address()
     if not hosts:
         return {}
+
+    def one(host):
+        return probe_one(host, address, settings.timeout(PROBE_TIMEOUT) if settings else PROBE_TIMEOUT)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(hosts))) as pool:
-        return dict(zip(hosts, pool.map(lambda h: probe_one(h, address), hosts)))
+        return dict(zip(hosts, pool.map(one, hosts)))
 
 
 # ---- the service ----
