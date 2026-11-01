@@ -69,10 +69,8 @@ def select(ctx, zone, record, rtype=None):
 def one(ctx, zone, record, rtype=None):
     found = select(ctx, zone, record, rtype)
     if len(found) > 1:
-        raise errors.UsageError(
-            "%d records answer to %s: name one by its id\n%s"
-            % (len(found), record, fmt.table([row(r) for r in found], COLUMNS))
-        )
+        choices = ", ".join("%s (%s %s %s)" % (r["id"], r["type"], r["name"], row(r)["content"]) for r in found)
+        raise errors.UsageError("%d records answer to %s: name one by its id: %s" % (len(found), record, choices))
     return found[0]
 
 

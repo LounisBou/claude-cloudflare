@@ -219,6 +219,7 @@ cf nope
 check "an unknown command exits 2" "2" "$CODE"
 cf zones --jso
 check "an abbreviated flag is refused" "2" "$CODE"
+check "a usage error is one line" "cf: unrecognized arguments: --jso" "$ERR"
 cf
 check "no command exits 2" "2" "$CODE"
 
@@ -341,7 +342,8 @@ cfw dns-update example.com app
 check "dns-update with nothing to change exits 2" "2 cf: nothing to change: pass type, name, content, ttl, proxied, priority or comment" "$CODE $ERR"
 cfw dns-update example.com multi --content three
 check "dns-update of an ambiguous name exits 2" "2" "$CODE"
-check_contains "an ambiguous name lists the records to choose from" "TXT	multi.example.com	one" "$ERR"
+check_contains "an ambiguous name lists the records to choose from" "TXT multi.example.com one" "$ERR"
+check "an ambiguous name is one error line" "1" "$(printf '%s\n' "$ERR" | wc -l | tr -d ' ')"
 cfw dns-update example.com www --type TXT --content hello
 check "a type that cannot be proxied leaves the proxy" "after	TXT	www.example.com	hello	no" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1-5)"
 cfw dns-update example.com www --type A --content 203.0.113.10 --proxied --ttl 120
@@ -366,6 +368,10 @@ check "backups lists every backup, oldest first" "account	zone	taken	kind	path" 
 check "backups lists the writes made" "$delete_bk" "$(printf '%s\n' "$OUT" | tail -1 | cut -f5)"
 cf backups --zone example.net
 check "backups --zone filters" "" "$OUT"
+cf backups --account beta
+check "backups --account filters" "" "$OUT"
+cf backups --account ALPHA
+check "backups --account reads the name without regard to case" "1" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1 | grep -c '^alpha$')"
 cf backups --json
 check "backups --json gives objects" "dns" \
   "$(printf '%s' "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["kind"])')"

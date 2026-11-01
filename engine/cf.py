@@ -35,7 +35,7 @@ class _ArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
     def error(self, message):
-        self.print_usage(sys.stderr)
+        # One line, as every other error: the usage is in REFERENCE.md.
         raise errors.UsageError(message)
 
 
@@ -90,8 +90,7 @@ def run(argv, writes):
         raise errors.UsageError("%s writes: use cf-write.py" % command)
     args = parser.parse_args(argv)
     if not args.command:
-        parser.print_usage(sys.stderr)
-        raise errors.UsageError("no command given")
+        raise errors.UsageError("no command given; the commands are in engine/REFERENCE.md")
     cfg = config.load_config()
     if getattr(args, "account_free", False):
         ctx = context.Context(cfg, None, None, backup)
