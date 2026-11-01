@@ -1163,6 +1163,11 @@ check "a token echoed back by the API is masked" "cf: Cloudflare 9999: bad heade
 fail_next GET /zones 400 9999 "bad header Bearer $TOKEN_BETA"
 EXTRA_ENV="BETA_CLOUDFLARE_ACCOUNT_ID=acc-beta" cf zones --account beta
 check "the second account's token echoed back is masked" "cf: Cloudflare 9999: bad header Bearer [token]" "$ERR"
+reset
+fail_next PUT /rulesets/phases/http_request_firewall_custom/entrypoint 400 9999 "bad header Bearer $TOKEN_ALPHA"
+cfw block-countries tm.example.com RU
+check "a token echoed back by a failing write is masked" \
+  "3 cf: Cloudflare 9999: bad header Bearer [token]; backup: ${ERR##*; backup: }" "$CODE $ERR"
 
 check "no backup holds a fixture token" "" \
   "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$WORK/backups" 2>/dev/null)"
