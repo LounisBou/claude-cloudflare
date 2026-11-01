@@ -427,6 +427,51 @@ check "e2e: the update's backup brings the CNAME back" \
 cfj '{"command": "dns-get", "args": {"zone": "example.com", "record": "e2e"}}'
 check "e2e: the name holds the CNAME alone" "CNAME	e2e.example.com	www.example.com	yes	auto" "$(lines)"
 
+echo "== install.sh and the doctor =="
+
+# inst [args...]: install.sh in the same scrubbed environment as the engine.
+inst() {
+  env -i PATH="${INST_PATH:-$PATH}" HOME="$HOMEDIR" CLAUDE_CLOUDFLARE_CONFIG="$CONFIG" CF_API_BASE="$API" \
+    BETA_CLOUDFLARE_API_TOKEN="${INST_BETA-$TOKEN_BETA}" ${EXTRA_ENV:-} \
+    /bin/bash "$ROOT/install.sh" "$@" >"$WORK/out" 2>"$WORK/err"
+  CODE=$?
+  OUT=$(cat "$WORK/out")
+  ERR=$(cat "$WORK/err")
+  cat "$WORK/out" "$WORK/err" >> "$CAPTURED"
+}
+
+reset
+inst --check
+check "the doctor passes with every token valid" "0" "$CODE"
+check_contains "the doctor checks alpha's token" "cloudflare: account alpha: active" "$OUT"
+check_contains "the doctor checks beta's token" "cloudflare: account beta: active" "$OUT"
+check "the doctor verifies each account once" "2" "$(sent | grep -c 'tokens/verify')"
+
+mkdir -p "$WORK/nopython"
+INST_PATH="$WORK/nopython" inst --check
+check "no python3 exits 11" "11" "$CODE"
+check_contains "no python3 names the fix" "fix:" "$ERR"
+
+mkdir -p "$WORK/oldpython"
+printf '#!/bin/sh\necho False\n' > "$WORK/oldpython/python3"
+chmod +x "$WORK/oldpython/python3"
+INST_PATH="$WORK/oldpython:/usr/bin:/bin" inst --check
+check "a python3 older than 3.9 exits 11" "11" "$CODE"
+
+# An empty token is no account.
+INST_BETA= EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/noaccount.json" inst --check
+check "no account exits 12" "12" "$CODE"
+INST_BETA= EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/noaccount.json" inst
+check_contains "install says where a token goes" "<NAME>_CLOUDFLARE_API_TOKEN" "$ERR"
+
+EXTRA_ENV="BETA_CLOUDFLARE_API_TOKEN=cf-wrong" inst --check
+check "a token that fails its check exits 13" "13" "$CODE"
+check_contains "the other accounts are still checked" "cloudflare: account alpha: active" "$OUT"
+check_contains "the failing account is named" "cloudflare: account beta: cf: Cloudflare 10000: Authentication error" "$ERR"
+
+EXTRA_ENV="CLAUDE_CLOUDFLARE_CONFIG=$WORK/broken.json" inst --check
+check "a malformed config exits 14" "14" "$CODE"
+
 echo "== tokens never leave =="
 
 reset
