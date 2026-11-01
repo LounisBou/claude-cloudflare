@@ -2,17 +2,18 @@
 documentation, and the cycle every change goes through.
 
 A change (caddy-site-set, caddy-site-remove, caddy-reload) holds a lock for
-its whole cycle, one change at a time, and runs the same steps: copy the Caddyfile beside itself; probe every site; edit the one block;
-caddy validate, and on failure put the copy back; caddy reload; check the
-admin API answers; probe every site again. A site that answered and no longer
-does, a failed reload or a dead admin API put the copy back, validate and
-reload it, and probe again: exit 6, or 7 when Caddy is still not alive. Any
-other exception once the file is written, SIGTERM included, puts the copy back
+its whole cycle, one change at a time, and runs the same steps: copy the
+Caddyfile beside itself; probe every site; edit the one block; caddy
+validate, and on failure put the copy back; caddy reload; check the admin API
+answers; probe every site again. A site that answered and no longer does, a
+failed reload or a dead admin API put the copy back, validate and reload it,
+and probe again: exit 6, or 7 when Caddy is still not alive. Any other
+exception once the file is written, SIGTERM included, puts the copy back
 before it goes on; a copy that cannot be put back is exit 4. The cycle has
 one deadline: each step takes its time from what is left, a step past it is a
 failure the rollback takes back, in the time kept for it. The Caddyfile is
-the only source of truth: nothing is written through the admin
-API, and Caddy is never stopped or restarted.
+the only source of truth: nothing is written through the admin API, and Caddy
+is never stopped or restarted.
 """
 
 import os

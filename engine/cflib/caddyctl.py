@@ -7,9 +7,9 @@ process, never its argument vector. With "sudo": true every caddy call is
 prefixed with sudo -n, which keeps those variables by name
 (--preserve-env=NAMES): a password prompt fails instead of waiting. The
 Caddyfile and its copies go through sudo -n too (cat, tee, cp -p) when the
-user cannot read or write them; a refusal of sudo names the rule it needs. Nothing
-here stops, starts or restarts the service: caddy is only validated and
-reloaded.
+user cannot read or write them; a refusal of sudo names the rule it needs.
+Nothing here stops, starts or restarts the service: caddy is only validated
+and reloaded.
 """
 
 import concurrent.futures
@@ -164,11 +164,11 @@ class Settings:
         self.tls_snippet = value("tls_snippet")
         self.sudo = value("sudo", bool, False)
         self.admin = value("admin", default=DEFAULT_ADMIN)
-        # Set by a cycle: every call and probe is then cut to the time it has left.
-        self.deadline = None
         if "/" in self.admin:
             raise errors.ConfigError("%s: caddy.admin must be host:port; an admin API on a unix socket "
                                      "is not supported" % config.path)
+        # Set by a cycle: every call and probe is then cut to the time it has left.
+        self.deadline = None
 
     def timeout(self, default):
         return self.deadline.timeout(default) if self.deadline else default

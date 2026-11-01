@@ -6,9 +6,9 @@ token runs to the end of the line; a token that starts with a double quote or
 a backtick runs to the closing one (a backslash escapes inside double quotes
 and outside quotes); "<<MARKER" at the end of a line opens a heredoc that the
 first line holding MARKER after its indentation, alone or followed by a space
-("MARKER 200"), closes. A brace opens or closes a block only
-as a token of its own and unquoted, so "{host}", "{$TOKEN}" or a "{" inside
-quotes, a comment or a heredoc is a word.
+("MARKER 200"), closes. A brace opens or closes a block only as a token of its
+own and unquoted, so "{host}", "{$TOKEN}" or a "{" inside quotes, a comment or
+a heredoc is a word.
 
 Nothing here reads or writes a file: the edits take the text and give back
 the new text, so the bytes outside the edited block come through untouched.
