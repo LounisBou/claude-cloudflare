@@ -374,12 +374,18 @@ admin API, and Caddy is never stopped or restarted. The envfile's variables
 reach `caddy validate` and `caddy reload` through their environment, never
 their arguments; with `"sudo": true` each call runs as
 `sudo -n --preserve-env=<the envfile's names> <binary> …`, so a password prompt
-fails instead of waiting. The envfile's values are masked in every output.
+fails instead of waiting, and the Caddyfile and its copies are read and
+written through `sudo -n cat`, `tee` and `cp -p` when the user cannot. A
+refusal of sudo exits 4 and names the sudoers rule it needs (NOPASSWD, and
+SETENV or `env_keep` for `--preserve-env`): never a failed validate, and the
+Caddyfile is put back when it was written. The envfile's values are masked in
+every output, before an error line is cut; an envfile name that is not
+`[A-Za-z_][A-Za-z0-9_]*`, or is `PATH`, `LD_*` or `DYLD_*`, exits 4.
 
 A host is a DNS name, read without regard to case or an `https://` prefix.
 Its block is the one whose only address is `<host>` or `https://<host>`. A
 block holding the host with other addresses or under another form
-(`<host>:443`), two blocks for it, a wildcard host, a site written without
+(`<host>:443`, `<host>.`), two blocks for it, a wildcard host, a site written without
 braces or a Caddyfile whose braces do not balance exit 5: edit those by hand,
 then `caddy-reload`. A wildcard block that also covers the host is left alone.
 
@@ -399,7 +405,8 @@ block: exit 2.
 ### `caddy-status` (read)
 
 Columns: `check state detail`, rows `binary` (`caddy version`), `admin`
-(`alive` when `GET /config/` answers 200), `caddyfile` (site count),
+(`alive` when `GET /config/` answers 200, `down` on any other answer),
+`caddyfile` (site count),
 `validate` (`ok` or `failed` with Caddy's error line), `envfile`, `service`.
 Then `warning: …` lines: the service does not start Caddy with the envfile
 (launchd: no `--envfile <envfile>` in `ProgramArguments`; systemd: no
@@ -414,9 +421,11 @@ that digest. An unknown topic exits 2 and lists them.
 ### `caddy-site-set <host> --body-file <path>` (write)
 
 The file holds the block's directives only, without the address and braces;
-its braces must balance (else exit 2). Its common indentation becomes one tab.
-The host's block is replaced (its address kept as written) or a new
-`https://<host>` block is appended after one blank line. Every other byte of
+its braces must balance (else exit 2). Its common indentation becomes one tab;
+the lines inside a backtick string or a heredoc keep their bytes. The host's
+block is replaced (its address kept as written) or a new `https://<host>`
+block is appended after one blank line (blank lines ending the file count as
+that one). Every other byte of
 the file is kept. A body equal to the current one: `unchanged<TAB>host`,
 nothing run.
 
@@ -427,24 +436,37 @@ No such block: exit 2. The removed host going down is expected, not a failure.
 
 ### `caddy-reload` (write)
 
-The same cycle on the file as it is (after a hand edit). Its rollback can only
-reload that same file again: a host still down is named.
+The same cycle on the file as it is (after a hand edit), writing nothing: no
+copy, no rewrite, so a Caddyfile the user cannot write is reloaded all the
+same. Its rollback can only reload that same file again: a host still down is
+named. Output: the status lines, or `reloaded`.
 
 ### The cycle (the three writes)
 
-Before anything, the admin API must answer: a Caddy that is not running exits
-5, nothing changed.
+One change at a time: each holds `<backup_dir>/caddy.lock` for its whole
+cycle; another waits for it 15 seconds at most, then exits 5, nothing
+changed. A whole cycle stays within 100 seconds (under the tool's 120): each
+step's timeout is cut to what is left, 40 % of it kept for a rollback; a step
+past it fails, is taken back like any failure, and the error says the budget
+ran out. A caddy run past its timeout is killed with every process it started.
 
-1. Copy the Caddyfile to `<caddyfile>.bak-<UTC timestamp>` (mode 600).
+Before anything, a Caddyfile the user cannot write (and `sudo` is off) exits
+4, and the admin API must answer: a Caddy that is not running exits 5;
+nothing changed either way.
+
+1. Copy the Caddyfile to `<caddyfile>.bak-<UTC timestamp>` (mode 600; through
+   sudo, the Caddyfile's owner and mode).
 2. Probe every https site of the file, old and new: a TLS handshake and a
-   request on `127.0.0.1:443` with SNI = the host; `ok` (any HTTP status) or
-   `down` (connection, TLS or no HTTP answer).
+   request on `127.0.0.1:443` with SNI = the host; `ok` (any HTTP status, or
+   `no-http`: the handshake completed but no HTTP line came) or `down`
+   (connection or TLS failure).
 3. Write the edit in place (the file keeps its inode, owner and mode). A
    Caddyfile that cannot be written exits 4, unchanged.
 4. `caddy validate --config <caddyfile> --adapter caddyfile`. Failure: the copy
    is put back, exit 6 with Caddy's error line.
-5. `caddy reload --config <caddyfile> --adapter caddyfile`, then the admin API
-   must answer `GET /config/` with 200.
+5. `caddy reload --config <caddyfile> --adapter caddyfile` (with `--address
+   <admin>` when the admin API is not the default), then the admin API must
+   answer `GET /config/` with 200.
 6. Probe again. A host `ok` before and `down` after, a failed reload or a dead
    admin API: the copy is put back, validated, reloaded and probed again; exit
    6, or 7 when Caddy is still not alive (look at it now).
@@ -453,4 +475,7 @@ Before anything, the admin API must answer: a Caddy that is not running exits
    a fall to `down` (a 502 behind a stopped service) is reported, not rolled
    back.
 
-Every failure after step 1 ends its error line with `backup: <copy>`.
+Every failure after step 1 ends its error line with `backup: <copy>`. Any
+other exception once the file is written, SIGTERM included, puts the copy back
+before the engine stops. A copy that cannot be put back exits 4 (not 7: caddy
+runs, the file is what failed) and says what caddy runs and what to put back.
