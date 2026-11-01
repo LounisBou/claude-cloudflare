@@ -22,15 +22,19 @@ def _upto(top):
 
 # Enterprise sets any mitigation timeout up to a day through the API: None.
 QUOTAS = {
-    "free": {"custom_rules": 5, "rate_limit_rules": 1, "managed": ("free",), "bot": "bot-fight-mode",
+    "free": {"cache_rules": 10, "custom_rules": 5, "rate_limit_rules": 1, "managed": ("free",), "bot": "bot-fight-mode",
              "periods": _upto(10), "timeouts": _upto(10)},
-    "pro": {"custom_rules": 20, "rate_limit_rules": 2, "managed": ("free", "cloudflare", "owasp"),
+    "pro": {"cache_rules": 25, "custom_rules": 20, "rate_limit_rules": 2, "managed": ("free", "cloudflare", "owasp"),
             "bot": "super-bot-fight-mode", "periods": _upto(60), "timeouts": _upto(3600)},
-    "business": {"custom_rules": 100, "rate_limit_rules": 5, "managed": ("free", "cloudflare", "owasp"),
+    "business": {"cache_rules": 50, "custom_rules": 100, "rate_limit_rules": 5, "managed": ("free", "cloudflare", "owasp"),
                  "bot": "super-bot-fight-mode", "periods": _upto(600), "timeouts": _upto(86400)},
-    "enterprise": {"custom_rules": 1000, "rate_limit_rules": 100, "managed": ("free", "cloudflare", "owasp"),
+    "enterprise": {"cache_rules": 300, "custom_rules": 1000, "rate_limit_rules": 100, "managed": ("free", "cloudflare", "owasp"),
                    "bot": "bot-management", "periods": _upto(65535), "timeouts": None},
 }
+# Operations one purge call takes, by kind of purge: the documented limits are
+# the same on every plan but for the URLs of Enterprise.
+PURGE_MAX = {"files": 100, "hosts": 100, "prefixes": 100, "tags": 100}
+PURGE_MAX_ENTERPRISE_FILES = 500
 # Log is a custom-rule action of Enterprise only.
 LOG_PLANS = ("enterprise",)
 MANAGED_NAMES = {"free": "Free Managed Ruleset", "cloudflare": "Cloudflare Managed Ruleset",
@@ -68,3 +72,9 @@ def require_room(zone, quota, used, what):
     limit = limits(zone)[quota]
     if used >= limit:
         refuse(zone, "%s quota is full (%d of %d)" % (what, used, limit))
+
+
+def purge_max(zone, field):
+    if field == "files" and key(zone) == "enterprise":
+        return PURGE_MAX_ENTERPRISE_FILES
+    return PURGE_MAX[field]

@@ -3,14 +3,14 @@
   "owner": { "name": "Lounis Bou", "email": "lounis.bou@gmail.com" },
   "metadata": {
     "description": "Cloudflare tooling for Claude Code",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "cloudflare",
       "source": "./",
       "description": "Cloudflare from a native Claude Code tool: accounts by name, zones and DNS records with a backup before every write, facading a Python stdlib engine.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "author": { "name": "Lounis Bou" }
     }
   ]

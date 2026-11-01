@@ -13,7 +13,7 @@ import re
 
 from . import errors, quotas, rulesets, zones
 
-_HOST = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
+HOST = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 _COUNTRY = re.compile(r"^[A-Z]{2}$|^T1$")
 _PATH = re.compile(r"/[A-Za-z0-9._~/%+-]*")
 # A merge stops at 4,000 characters: Cloudflare refuses an expression past
@@ -38,7 +38,7 @@ def resolve(ctx, target):
     name = target.strip().lower().rstrip(".")
     if "*" in name:
         raise errors.UsageError("%s: a rule on http.host never matches a wildcard; target the zone instead" % name)
-    if not _HOST.match(name):
+    if not HOST.match(name):
         raise errors.UsageError("%s is not a host or a zone name" % target)
     params = {"account.id": ctx.account.account_id} if ctx.account.account_id else None
     found = [z for z in ctx.api.get("/zones", params=params) or []
@@ -67,11 +67,11 @@ def _in(codes):
     return "ip.src.country in {%s}" % " ".join('"%s"' % c for c in codes)
 
 
-def _host_clause(host):
+def host_clause(host):
     return 'http.host eq "%s"' % host if host else None
 
 
-def _path_clause(path):
+def path_clause(path):
     if path is None:
         return None
     if not _PATH.fullmatch(path):
@@ -148,7 +148,7 @@ def block_countries(args, ctx):
     zone, host = resolve(ctx, args.target)
     codes = countries(args.countries)
     rule = _plugin_rule("block-countries %s %s" % (_label(host, zone), ",".join(codes)),
-                        expression(_host_clause(host), _in(codes)), "block")
+                        expression(host_clause(host), _in(codes)), "block")
     return add_custom(ctx, zone, rule)
 
 
@@ -156,7 +156,7 @@ def allow_only_countries(args, ctx):
     zone, host = resolve(ctx, args.target)
     codes = countries(args.countries)
     rule = _plugin_rule("allow-only-countries %s %s" % (_label(host, zone), ",".join(codes)),
-                        expression(_host_clause(host), "not " + _in(codes)), "block")
+                        expression(host_clause(host), "not " + _in(codes)), "block")
     return add_custom(ctx, zone, rule)
 
 
@@ -164,7 +164,7 @@ def challenge(args, ctx):
     zone, host = resolve(ctx, args.target)
     codes = countries(args.country) if args.country else None
     desc = " ".join(p for p in ("challenge", _label(host, zone), args.path or "", ",".join(codes or [])) if p)
-    rule = _plugin_rule(desc, expression(_host_clause(host), _path_clause(args.path), codes and _in(codes)),
+    rule = _plugin_rule(desc, expression(host_clause(host), path_clause(args.path), codes and _in(codes)),
                         CHALLENGES[args.type])
     return add_custom(ctx, zone, rule)
 
@@ -187,7 +187,7 @@ def rate_limit(args, ctx):
         quotas.refuse(zone, "the mitigation timeout takes %s seconds only" % ", ".join(map(str, timeouts)))
     if args.requests < 1:
         raise errors.UsageError("--requests must be at least 1")
-    expr = expression(_host_clause(host), _path_clause(args.path))
+    expr = expression(host_clause(host), path_clause(args.path))
     rule = _plugin_rule("rate-limit %s %s %d/%ds" % (_label(host, zone), args.path or "", args.requests, period),
                         expr, args.action, ratelimit={
                             "characteristics": ["cf.colo.id", "ip.src"], "period": period,

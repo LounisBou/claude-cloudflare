@@ -267,3 +267,96 @@ rules.
 
 Bot Fight Mode, the Free plan's product. Other plans (Super Bot Fight Mode,
 Bot Management) exit 5: they are set in the dashboard.
+
+## Cache rules and purge
+
+Cache rules are the zone's `http_request_cache_settings` entrypoint, written
+with the same discipline as the protections: the whole entrypoint is read,
+only the targeted rule changes, every other rule is sent back, and the
+entrypoint is saved first (kind `ruleset`; `restore` replays it). The plan's
+cache-rule quota (Free 10, Pro 25, Business 50, Enterprise 300) is checked
+before the write: exit 5 when full.
+
+### `cache-rules <zone>` (read)
+
+Columns: `id mode enabled description expression`. `mode` is `cache`,
+`bypass`, `ttl <seconds>` or `other`.
+
+### `cache-rule-add <zone> (--host H [--path-prefix P] | --path-prefix P | --expression E) [--mode cache|bypass|ttl] [--ttl S] [--description D]` (write)
+
+`cache` (default) caches everything that matches; `bypass` never caches;
+`ttl` caches with an edge TTL of `--ttl` seconds that overrides the origin's.
+`--host` must belong to the zone. A raw `--expression` excludes `--host` and
+`--path-prefix`. An equal rule already there: `unchanged`. Lines: `created`
+(columns of `cache-rules`, the verb first), then `backup: <path>`.
+
+### `cache-rule-delete <zone> <rule>` (write)
+
+Deletes the rule of this id from the cache entrypoint, the other rules kept.
+Lines: `deleted`, then `backup: <path>`.
+
+### `purge <zone> --url U... | --host H... | --prefix P... | --tag T...` (write)
+
+One kind per call, each flag repeatable (`"url": ["…"]` on stdin). URLs, hosts
+and prefixes must belong to the zone. A call takes at most 100 values (500 URLs
+on Enterprise): more exits 5. Output: `purged<TAB>files|hosts|prefixes|tags<TAB>count`.
+Nothing is saved: a purge changes no stored state.
+
+### `purge-all <zone>` (write)
+
+Purges everything cached for the zone. Output: `purged<TAB>everything<TAB>zone`.
+Asked every time.
+
+## Workers
+
+The account's id is `<NAME>_CLOUDFLARE_ACCOUNT_ID`, else the one account the
+token sees. Script backups are kept under `backup_dir/<account>/workers/`
+(kind `worker`); a zone's route backups under the zone's (kind
+`worker-routes`). A script's main module is saved and restored, its name and
+content: a module Worker's content is read as multipart, its main module named
+by Cloudflare's `cf-entrypoint` header; a service worker's as plain text, and
+restored as one. A script whose content cannot be saved whole (more than its
+main module, no `cf-entrypoint`, not UTF-8) is not overwritten, deleted or
+restored over: exit 5, nothing changed. Bindings are not managed, but an upload
+over a script keeps the script's own, secrets included (`keep_bindings`, the
+types its settings list), and its compatibility flags.
+
+### `workers` (read)
+
+Columns: `name modified compatibility_date`.
+
+### `worker-deploy <name> --file <module.js> [--compatibility-date YYYY-MM-DD]` (write)
+
+Uploads the file as an ES module: a multipart body with a `metadata` part
+(`main_module`, `compatibility_date`; over a script, `keep_bindings` and
+`compatibility_flags` too) and the module part. The compatibility
+date defaults to the script's current one, else today (UTC). A script it
+replaces is saved first. Lines: `deployed<TAB>name<TAB>date`, then
+`backup: <path>` when one was taken.
+
+### `worker-delete <name>` (write)
+
+Saves the script's content, then deletes it. Lines: `deleted<TAB>name`, then
+`backup: <path>`. `restore` uploads it again. Asked every time.
+
+### `worker-routes <zone>` (read)
+
+Columns: `id pattern script`.
+
+### `worker-route-add <zone> <pattern> <script>` (write)
+
+The pattern's host must belong to the zone and the script must exist. The
+zone's routes are saved first. Lines: `created<TAB>id<TAB>pattern<TAB>script`,
+then `backup: <path>`.
+
+### `worker-route-delete <zone> <route>` (write)
+
+By id or pattern. Lines: `deleted…`, then `backup: <path>`. `restore` of a
+routes backup deletes the routes added since and creates the deleted ones again
+(`recreated`, under a new id).
+
+### `worker-domain-add <hostname> <script>` (write)
+
+Attaches the hostname (a host of one of the account's zones) to the script as
+a custom domain. Already attached to the same script: `unchanged`; attached to
+another one: exit 5, nothing is overwritten. Output: `attached<TAB>host<TAB>script`.

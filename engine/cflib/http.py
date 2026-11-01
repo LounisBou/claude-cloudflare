@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 from . import creds, errors
 
@@ -99,45 +100,81 @@ class Api:
     def delete(self, path, body=None, params=None):
         return self._request("DELETE", path, body, params).get("result")
 
-    def _request(self, method, path, body, params, raw=False):
+    def put_form(self, path, parts, params=None):
+        """PUT a multipart/form-data body. parts: (name, filename or None,
+        content type, bytes) tuples, sent in order."""
+        boundary = uuid.uuid4().hex
+        chunks = []
+        for name, filename, ctype, content in parts:
+            disposition = 'form-data; name="%s"' % name
+            if filename:
+                disposition += '; filename="%s"' % filename
+            chunks.append(("--%s\r\nContent-Disposition: %s\r\nContent-Type: %s\r\n\r\n"
+                           % (boundary, disposition, ctype)).encode() + content + b"\r\n")
+        form = (b"".join(chunks) + ("--%s--\r\n" % boundary).encode(), "multipart/form-data; boundary=" + boundary)
+        return self._request("PUT", path, None, params, form=form).get("result")
+
+    def get_content(self, path, params=None):
+        """GET a body that is not JSON, untouched: (the answer's headers, its
+        bytes). An error answer raises ApiError as any other call."""
+        status, headers, answer = self._exchange("GET", path, params, None, "application/json")
+        if status >= 400:
+            # An error answer is Cloudflare's envelope: _parsed raises it.
+            _parsed(status, answer.decode("utf-8", errors="replace"))
+        return headers, answer
+
+    def _request(self, method, path, body, params, raw=False, form=None):
+        data = json.dumps(body).encode() if body is not None else None
+        content_type = "application/json"
+        if form:
+            data, content_type = form
+        status, _, answer = self._exchange(method, path, params, data, content_type)
+        text = answer.decode("utf-8", errors="replace")
+        if raw and status < 400:
+            return text
+        return _parsed(status, text)
+
+    def _exchange(self, method, path, params, data, content_type):
+        """Send the request, again after a 429: (status, headers, body bytes)."""
         url = base_url() + path
         query = {k: v for k, v in (params or {}).items() if v is not None}
         if query:
             url += "?" + urllib.parse.urlencode(query)
         headers = {
             "Authorization": "Bearer " + creds.token(self.account),
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "User-Agent": "claude-cloudflare",
         }
-        data = json.dumps(body).encode() if body is not None else None
         for attempt in range(_MAX_RETRIES):
-            status, text = _send(method, url, data, headers)
+            status, answered, answer = _send(method, url, data, headers)
             # A 429 is a request Cloudflare did not process: sending it again
             # cannot apply a write twice. Nothing else is retried.
             if status == 429 and attempt < _MAX_RETRIES - 1:
                 time.sleep(2 ** attempt)
                 continue
-            break
-        if raw and status < 400:
-            return text
-        try:
-            parsed = json.loads(text) if text else {}
-        except ValueError:
-            raise errors.ApiError("Cloudflare answered HTTP %s with a body that is not JSON" % status)
-        if status >= 400 or not isinstance(parsed, dict) or parsed.get("success") is False:
-            raise _failure(status, parsed)
-        return parsed
+            return status, answered, answer
+
+
+def _parsed(status, text):
+    """An answer's envelope; ApiError when it is an error or not JSON."""
+    try:
+        parsed = json.loads(text) if text else {}
+    except ValueError:
+        raise errors.ApiError("Cloudflare answered HTTP %s with a body that is not JSON" % status)
+    if status >= 400 or not isinstance(parsed, dict) or parsed.get("success") is False:
+        raise _failure(status, parsed)
+    return parsed
 
 
 def _send(method, url, data, headers):
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with _OPENER.open(req, timeout=_TIMEOUT) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")
+            return resp.status, resp.headers, resp.read()
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise errors.ApiError("Cloudflare answered HTTP %s, a redirect, which is not followed" % exc.code)
-        return exc.code, exc.read().decode("utf-8", errors="replace")
+        return exc.code, exc.headers, exc.read()
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         raise errors.ApiError("cannot reach the Cloudflare API at %s: %s" % (base_url(), reason))
