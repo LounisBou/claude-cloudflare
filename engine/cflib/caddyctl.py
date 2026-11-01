@@ -34,6 +34,9 @@ CALL_TIMEOUT = 60
 SECRET_MIN = 8
 _STAMP = "%Y%m%dT%H%M%S.%fZ"
 _STATUS = re.compile(rb"^HTTP/\d(?:\.\d)? (\d{3})")
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Names that would change which programs caddy loads, not what it is told.
+_UNSAFE = re.compile(r"^(?:PATH|LD_.*|DYLD_.*)$")
 DOWN = None
 
 
@@ -115,7 +118,8 @@ class Settings:
 
     def variables(self):
         """The envfile's KEY=value pairs; {} without an envfile. One that is
-        set but cannot be read stops the command before anything changes."""
+        set but cannot be read, or that names a variable caddy must not take
+        from it, stops the command before anything changes."""
         if not self.envfile:
             return {}
         try:
@@ -124,7 +128,18 @@ class Settings:
         except OSError as exc:
             raise errors.ConfigError("cannot read the envfile %s: %s; nothing was changed"
                                      % (self.envfile, exc.strerror))
-        return creds.read_env_file(self.envfile)
+        variables = creds.read_env_file(self.envfile)
+        for key in variables:
+            if not key:
+                raise errors.ConfigError("the envfile %s has a line with no name before =; nothing was changed"
+                                         % self.envfile)
+            if not _NAME.match(key):
+                raise errors.ConfigError("the envfile %s: %s is not a variable name; nothing was changed"
+                                         % (self.envfile, key))
+            if _UNSAFE.match(key):
+                raise errors.ConfigError("the envfile %s sets %s, which caddy's environment does not take from it; "
+                                         "nothing was changed" % (self.envfile, key))
+        return variables
 
     # ---- caddy ----
 

@@ -1763,6 +1763,26 @@ cdyw caddy-site-set new.example.com --body-file "$BODY"
 check "an envfile that cannot be read exits 4 before anything changes" "4 same 0" "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies)"
 chmod 600 "$ENVFILE"
 
+# envkey <line> <what the error names>: an envfile holding the line is refused.
+envkey() {
+  caddy_reset
+  printf 'CF_API_TOKEN=%s\n%s\n' "$CADDY_TOKEN" "$1" > "$CADDY/etc/bad.env"
+  caddy_config "$WORK/caddy-badenv.json" ", \"envfile\": \"$CADDY/etc/bad.env\""
+  CCONF="$WORK/caddy-badenv.json" cdyw caddy-site-set new.example.com --body-file "$BODY"
+  check "an envfile line $1 exits 4 before anything changes" "4 same 0 " \
+    "$CODE $(same "$CADDYFILE" "$ORIGINAL") $(copies) $(calls)"
+  check_contains "…naming what is wrong with $1" "$2" "$ERR"
+}
+envkey 'PATH=/tmp/evil' "cf: the envfile $CADDY/etc/bad.env sets PATH"
+envkey 'LD_PRELOAD=/tmp/evil.so' "cf: the envfile $CADDY/etc/bad.env sets LD_PRELOAD"
+envkey 'DYLD_INSERT_LIBRARIES=/tmp/evil.dylib' "cf: the envfile $CADDY/etc/bad.env sets DYLD_INSERT_LIBRARIES"
+envkey 'MY-TOKEN=x' "cf: the envfile $CADDY/etc/bad.env: MY-TOKEN is not a variable name"
+envkey '1TOKEN=x' "cf: the envfile $CADDY/etc/bad.env: 1TOKEN is not a variable name"
+envkey '=x' "cf: the envfile $CADDY/etc/bad.env has a line with no name before ="
+printf 'CF_API_TOKEN=%s\n_LOG_LEVEL2=debug\n' "$CADDY_TOKEN" > "$CADDY/etc/bad.env"
+CCONF="$WORK/caddy-badenv.json" cdyw caddy-site-set new.example.com --body-file "$BODY"
+check "a name of letters, digits and underscores is taken" "0" "$CODE"
+
 printf '{"backup_dir": "%s"}\n' "$WORK/backups" > "$WORK/nocaddy.json"
 CCONF="$WORK/nocaddy.json" cdy caddy-sites
 check "no caddy section in the config exits 4" "4" "$CODE"
