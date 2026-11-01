@@ -1,13 +1,18 @@
 """Workers: the account's scripts, a zone's routes and the custom domains.
 
 A script is uploaded as an ES module (multipart: a metadata part naming the
-main module, and the module itself). What a write is about to overwrite or
-delete is saved first: a script's content under the "workers" directory of the
-account's backups, a zone's routes under the zone's. restore replays both.
-Workers KV, R2, secrets and bindings are not managed here.
+main module, and the module itself). An upload over a script keeps its
+bindings, its secrets among them, and its compatibility flags. What a write is
+about to overwrite or delete is saved first: a script's main module, its name
+and content, under the "workers" directory of the account's backups, a zone's
+routes under the zone's; a script whose content is more than its main module
+cannot be saved whole, and is not overwritten or deleted. restore replays
+both. Workers KV, R2, secrets and bindings are not managed here.
 """
 
 import datetime
+import email.parser
+import email.policy
 import json
 import os
 import re
@@ -19,7 +24,9 @@ _MODULE = re.compile(r"^[A-Za-z0-9_.-]+\.m?js$")
 # Where an account's script backups live: not a zone name, which has a dot.
 BACKUP_DIR = "workers"
 MODULE_TYPE = "application/javascript+module"
-# What a restored script's module part is called: the content alone is saved.
+# A service worker's script part: a script whose content is plain text.
+SCRIPT_TYPE = "application/javascript"
+# What a restored service worker's part is called: the content alone is saved.
 RESTORED_MODULE = "worker.js"
 
 
@@ -48,17 +55,70 @@ def _name(name):
     return name
 
 
-def _save_script(ctx, script, content):
+def _unfaithful(name, reason):
+    raise errors.Refused("cannot save the Worker %s faithfully: %s; nothing was changed" % (name, reason))
+
+
+def _content(ctx, name):
+    """The script's code as content/v2 gives it: (main module, content). A
+    module Worker's is multipart, its main module named by the cf-entrypoint
+    header; a service worker's is plain text, with no main module (None).
+    Content that cannot be saved whole is refused (exit 5)."""
+    headers, answer = ctx.api.get_content("%s/scripts/%s/content/v2" % (_base(ctx), name))
+    ctype = headers.get("Content-Type") or ""
+    module = None
+    if ctype.lower().startswith("multipart/form-data"):
+        module = headers.get("cf-entrypoint")
+        if not module:
+            _unfaithful(name, "its multipart content names no main module (cf-entrypoint)")
+        form = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+            b"Content-Type: " + ctype.encode("latin-1") + b"\r\n\r\n" + answer)
+        parts = list(form.iter_parts()) if form.is_multipart() else []
+        if len(parts) != 1:
+            _unfaithful(name, "its content holds %d parts, not its main module alone" % len(parts))
+        part = parts[0]
+        if part.get_param("name", header="content-disposition") != module or part.get_content_type() != MODULE_TYPE:
+            _unfaithful(name, "its one part is not the ES module %s" % module)
+        answer = part.get_payload(decode=True)
+    try:
+        return module, answer.decode("utf-8")
+    except UnicodeDecodeError:
+        _unfaithful(name, "its content is not UTF-8 text")
+
+
+def _kept(ctx, script):
+    """What an upload over the script carries so that the script keeps its
+    bindings, secrets included (keep_bindings: the types of the bindings
+    Cloudflare keeps from the previous upload), and its compatibility flags
+    (which an upload replaces)."""
+    settings = ctx.api.get("%s/scripts/%s/settings" % (_base(ctx), script["id"])) or {}
+    kept = {}
+    types = sorted({b["type"] for b in settings.get("bindings") or [] if b.get("type")})
+    if types:
+        kept["keep_bindings"] = types
+    if script.get("compatibility_flags"):
+        kept["compatibility_flags"] = script["compatibility_flags"]
+    return kept
+
+
+def _save_script(ctx, script, module, content):
     return ctx.backup.save(ctx.account, BACKUP_DIR, "worker", {
-        "account_id": accounts.account_id(ctx), "name": script["id"], "content": content,
-        "compatibility_date": script.get("compatibility_date")})
+        "account_id": accounts.account_id(ctx), "name": script["id"], "main_module": module,
+        "content": content, "compatibility_date": script.get("compatibility_date")})
 
 
-def _upload(ctx, name, module, content, date):
-    meta = {"main_module": module, "compatibility_date": date}
+def _upload(ctx, name, module, content, date, kept):
+    """Upload the script: an ES module named module, or a service worker when
+    module is None; kept is what _kept gave for the script it replaces."""
+    meta = dict(kept, compatibility_date=date)
+    if module:
+        meta["main_module"] = module
+        part = (module, module, MODULE_TYPE)
+    else:
+        meta["body_part"] = RESTORED_MODULE
+        part = (RESTORED_MODULE, RESTORED_MODULE, SCRIPT_TYPE)
     return ctx.api.put_form("%s/scripts/%s" % (_base(ctx), name), [
-        ("metadata", None, "application/json", json.dumps(meta).encode()),
-        (module, module, MODULE_TYPE, content.encode())])
+        ("metadata", None, "application/json", json.dumps(meta).encode()), part + (content.encode(),)])
 
 
 # ---- scripts ----
@@ -85,14 +145,17 @@ def worker_deploy(args, ctx):
     current = find_script(ctx, name)
     lines = []
     path = None
+    kept = {}
     if current:
-        path = _save_script(ctx, current, ctx.api.get("%s/scripts/%s/content/v2" % (_base(ctx), name), raw=True))
+        saved = _content(ctx, name)
+        kept = _kept(ctx, current)
+        path = _save_script(ctx, current, *saved)
     date = args.compatibility_date or (current or {}).get("compatibility_date") \
         or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     if path:
-        guard.after_backup(path, _upload, ctx, name, module, content, date)
+        guard.after_backup(path, _upload, ctx, name, module, content, date, kept)
     else:
-        _upload(ctx, name, module, content, date)
+        _upload(ctx, name, module, content, date, kept)
     lines.append("deployed\t%s\t%s" % (name, date))
     if path:
         lines.append("backup: " + path)
@@ -102,7 +165,7 @@ def worker_deploy(args, ctx):
 def worker_delete(args, ctx):
     name = _name(args.name)
     script = require_script(ctx, name)
-    path = _save_script(ctx, script, ctx.api.get("%s/scripts/%s/content/v2" % (_base(ctx), name), raw=True))
+    path = _save_script(ctx, script, *_content(ctx, name))
     guard.after_backup(path, ctx.api.delete, "%s/scripts/%s" % (_base(ctx), name))
     return "deleted\t%s\nbackup: %s" % (name, path)
 
@@ -112,15 +175,18 @@ def restore_worker(ctx, saved):
     """Upload the saved script over the current one; no line when it already is."""
     data = saved["data"]
     name = data["name"]
+    module = data.get("main_module", RESTORED_MODULE)
     current = find_script(ctx, name)
     lines = []
+    kept = {}
     if current:
-        have = ctx.api.get("%s/scripts/%s/content/v2" % (_base(ctx), name), raw=True)
-        if have == data["content"]:
+        have = _content(ctx, name)
+        if have == (module, data["content"]):
             return []
-        lines.append("backup: " + _save_script(ctx, current, have))
+        kept = _kept(ctx, current)
+        lines.append("backup: " + _save_script(ctx, current, *have))
     date = data.get("compatibility_date") or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    _upload(ctx, name, RESTORED_MODULE, data["content"], date)
+    _upload(ctx, name, module, data["content"], date, kept)
     return ["restored\t%s\t%s" % (name, date)] + lines
 
 

@@ -312,8 +312,14 @@ Asked every time.
 The account's id is `<NAME>_CLOUDFLARE_ACCOUNT_ID`, else the one account the
 token sees. Script backups are kept under `backup_dir/<account>/workers/`
 (kind `worker`); a zone's route backups under the zone's (kind
-`worker-routes`). Only the script's content is saved and restored, as one
-module named `worker.js`: bindings and multi-module scripts are not managed.
+`worker-routes`). A script's main module is saved and restored, its name and
+content: a module Worker's content is read as multipart, its main module named
+by Cloudflare's `cf-entrypoint` header; a service worker's as plain text, and
+restored as one. A script whose content cannot be saved whole (more than its
+main module, no `cf-entrypoint`, not UTF-8) is not overwritten, deleted or
+restored over: exit 5, nothing changed. Bindings are not managed, but an upload
+over a script keeps the script's own, secrets included (`keep_bindings`, the
+types its settings list), and its compatibility flags.
 
 ### `workers` (read)
 
@@ -322,7 +328,8 @@ Columns: `name modified compatibility_date`.
 ### `worker-deploy <name> --file <module.js> [--compatibility-date YYYY-MM-DD]` (write)
 
 Uploads the file as an ES module: a multipart body with a `metadata` part
-(`main_module`, `compatibility_date`) and the module part. The compatibility
+(`main_module`, `compatibility_date`; over a script, `keep_bindings` and
+`compatibility_flags` too) and the module part. The compatibility
 date defaults to the script's current one, else today (UTC). A script it
 replaces is saved first. Lines: `deployed<TAB>name<TAB>date`, then
 `backup: <path>` when one was taken.

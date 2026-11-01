@@ -1328,10 +1328,20 @@ check "redeploying a script says what it deployed" "$(printf 'deployed\thello\t2
 hello_bk=$(backup_of)
 check "…after a backup of its previous content" "export default { fetch() { return new Response('hello') } }" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["content"].strip())' "$hello_bk")"
+check "…and of its main module's name, read from the multipart content" "hello.js" \
+  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["main_module"])' "$hello_bk")"
+check "redeploying keeps the script's bindings, its secrets among them, and its compatibility flags" \
+  '{"compatibility_date": "2025-01-01", "compatibility_flags": ["nodejs_compat"], "keep_bindings": ["kv_namespace", "secret_text"], "main_module": "hello.js"}' \
+  "$(part_of hello metadata | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')"
+check "…and the script still has them" '[["CACHE", "kv_namespace"], ["API_KEY", "secret_text"]] ["nodejs_compat"]' \
+  "$(fixture '[[b["name"], b["type"]] for b in s["scripts"]["hello"]["bindings"]]') $(fixture 's["scripts"]["hello"]["compatibility_flags"]')"
+check "the redeployed module is the file's content" "$(cat "$WORK/hello.js")" "$(part_of hello hello.js)"
 cfw worker-deploy bad --file "$WORK/nope.js"
 check "a missing file exits 2" "2" "$CODE"
+check "…and sends no write" "" "$(writes)"
 cfw worker-deploy 'bad name' --file "$WORK/new.js"
 check "a script name is a plain name" "2" "$CODE"
+check "…and sends no write" "" "$(writes)"
 cfw worker-delete hello
 check "worker-delete prints the script" "deleted	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2)"
 del_worker_bk=$(backup_of)
@@ -1345,7 +1355,47 @@ cfw restore "$del_worker_bk"
 check "restore uploads the deleted script again" "restored	hello" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2)"
 cf workers
 check "the script is back" "fresh hello" "$(col 1 | tr '\n' ' ' | sed 's/ $//')"
-check "restore re-uploads the saved module" 'export default { fetch() { return new Response("v2") } }' "$(part_of hello worker.js)"
+check "restore re-uploads the saved module, under its name" 'export default { fetch() { return new Response("v2") } }' "$(part_of hello hello.js)"
+
+# The content of a script that is not one module cannot be saved faithfully:
+# the write it was read for is refused before anything is changed.
+reset
+plant '{"id": "multi", "account": "acc-alpha", "main_module": "index.js", "content": "import x from \"./lib.js\"; export default x;\n", "extra_parts": [{"name": "lib.js", "content_type": "application/javascript+module", "content": "export default {}\n"}], "compatibility_date": "2025-01-01"}'
+cfw worker-deploy multi --file "$WORK/new.js"
+check "redeploying a script of several modules exits 5" \
+  "5 cf: cannot save the Worker multi faithfully: its content holds 2 parts, not its main module alone; nothing was changed" "$CODE $ERR"
+check "…and sends no write" "" "$(writes)"
+cfw worker-delete multi
+check "deleting a script of several modules exits 5" "5" "$CODE"
+check "…and sends no write" "" "$(writes)"
+plant '{"id": "noentry", "account": "acc-alpha", "main_module": "index.js", "content": "export default {}\n", "no_entrypoint": true, "compatibility_date": "2025-01-01"}'
+cfw worker-deploy noentry --file "$WORK/new.js"
+check "a multipart content that names no main module exits 5" \
+  "5 cf: cannot save the Worker noentry faithfully: its multipart content names no main module (cf-entrypoint); nothing was changed" "$CODE $ERR"
+check "…and sends no write" "" "$(writes)"
+cfw worker-deploy fresh --file "$WORK/new.js" >/dev/null
+cfw worker-deploy fresh --file "$WORK/hello.js"
+fresh_bk=$(backup_of)
+plant '{"id": "fresh", "account": "acc-alpha", "main_module": "new.js", "content": "export default {}\n", "extra_parts": [{"name": "map.js.map", "content_type": "application/source-map", "content": "{}"}], "compatibility_date": "2025-01-01"}'
+cfw restore "$fresh_bk"
+check "restoring over a script that cannot be saved faithfully exits 5" "5" "$CODE"
+check "…and sends no write" "" "$(writes)"
+
+# A service-worker script's content is plain text: it is saved whole, and
+# restored as a service worker.
+plant '{"id": "classic", "account": "acc-alpha", "body_part": "script.js", "content": "addEventListener(\"fetch\", e => e.respondWith(new Response(\"classic\")))\n", "compatibility_date": "2024-01-01"}'
+cfw worker-delete classic
+classic_bk=$(backup_of)
+check "a service worker's plain-text content is saved whole, with no main module" \
+  '"addEventListener(\"fetch\", e => e.respondWith(new Response(\"classic\")))\n" null' \
+  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; print(json.dumps(d["content"]), json.dumps(d["main_module"]))' "$classic_bk")"
+cfw restore "$classic_bk"
+check "restore uploads it back as a service worker" \
+  "$(printf 'metadata|None|application/json\nworker.js|worker.js|application/javascript')" "$(upload_of classic)"
+check "…its metadata naming the body part" '{"body_part": "worker.js", "compatibility_date": "2024-01-01"}' \
+  "$(part_of classic metadata | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')"
+check "…and the script is the saved one" '"addEventListener(\"fetch\", e => e.respondWith(new Response(\"classic\")))\n"' \
+  "$(fixture 's["scripts"]["classic"]["content"]')"
 
 reset
 cf worker-routes example.com
@@ -1416,13 +1466,19 @@ cfwj "{\"command\": \"worker-deploy\", \"args\": {\"name\": \"tm\", \"file\": \"
 check "e2e: worker-deploy" "deployed" "$(printf '%s\n' "$OUT" | cut -f1)"
 cfwj '{"command": "worker-route-add", "args": {"zone": "example.com", "pattern": "tm.example.com/*", "script": "tm"}}'
 check "e2e: worker-route-add" "created" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
+cfwj "{\"command\": \"worker-deploy\", \"args\": {\"name\": \"hello\", \"file\": \"$WORK/hello.js\"}}"
+check "e2e: redeploying a script keeps its bindings" '[["CACHE", "kv_namespace"], ["API_KEY", "secret_text"]]' \
+  "$(fixture '[[b["name"], b["type"]] for b in s["scripts"]["hello"]["bindings"]]')"
 cfwj '{"command": "worker-delete", "args": {"name": "tm"}}'
 check "e2e: worker-delete" "deleted" "$(printf '%s\n' "$OUT" | head -1 | cut -f1)"
 e2e_bk=$(backup_of)
+check "e2e: the backup holds the main module read from the multipart content" "new.js $(cat "$WORK/new.js")" \
+  "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["data"]; print(d["main_module"], d["content"])' "$e2e_bk")"
 cfwj "{\"command\": \"restore\", \"args\": {\"path\": \"$e2e_bk\"}}"
 check "e2e: restore of the deleted script" "restored	tm" "$(printf '%s\n' "$OUT" | head -1 | cut -f1,2)"
 cfj '{"command": "workers"}'
 check "e2e: the script is back" "1" "$(printf '%s\n' "$OUT" | grep -c '^tm')"
+check "e2e: …as the module it was" "$(cat "$WORK/new.js")" "$(part_of tm new.js)"
 
 echo "== install.sh and the doctor =="
 

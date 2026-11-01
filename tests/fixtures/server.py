@@ -391,7 +391,9 @@ class Handler(BaseHTTPRequestHandler):
                 del state.scripts[parts[1]]
                 return 200, envelope(None)
             if method == "GET" and parts[2:] == ["content", "v2"]:
-                return 200, script["content"]
+                return 200, content(script)
+            if method == "GET" and parts[2:] == ["settings"]:
+                return 200, envelope({k: script.get(k) for k in ("bindings", "compatibility_date", "compatibility_flags")})
         if parts == ["domains"] and method == "GET":
             found = [d for d in state.domains.values() if d["account"] == account]
             if "hostname" in query:

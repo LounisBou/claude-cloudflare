@@ -1,6 +1,6 @@
 {
   "page_size": 2,
-  "scripts": [{"id": "hello", "account": "acc-alpha", "content": "export default { fetch() { return new Response('hello') } }\n", "compatibility_date": "2025-01-01", "modified_on": "2026-01-01T00:00:00Z"}],
+  "scripts": [{"id": "hello", "account": "acc-alpha", "main_module": "hello.js", "content": "export default { fetch() { return new Response('hello') } }\n", "bindings": [{"type": "kv_namespace", "name": "CACHE", "namespace_id": "ns-hello"}, {"type": "secret_text", "name": "API_KEY"}], "compatibility_date": "2025-01-01", "compatibility_flags": ["nodejs_compat"], "modified_on": "2026-01-01T00:00:00Z"}],
   "tokens": {
     "cf-fixture-token-alpha-7f3a9c2e": {"token_id": "tok-alpha", "accounts": ["acc-alpha"], "expires_on": null},
     "cf-fixture-token-beta-41d08b6a": {"token_id": "tok-beta", "accounts": ["acc-beta"], "expires_on": "2027-01-01T00:00:00Z"},
