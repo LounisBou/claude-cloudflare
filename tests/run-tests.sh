@@ -754,6 +754,19 @@ cfw block-countries 'a" or true or "b.example.com' FR
 check "a host cannot carry an expression" "2" "$CODE"
 cfw block-countries tm.example.com FRA
 check "a country code has two letters" "2 cf: FRA is not a two-letter country code" "$CODE $ERR"
+mark
+cfw block-countries '*.example.com' FR
+check "a wildcard host exits 2, saying to target the zone" \
+  "2 cf: *.example.com: a rule on http.host never matches a wildcard; target the zone instead" "$CODE $ERR"
+check "a wildcard host sends no request" "" "$(since_mark)"
+mark
+cfwj '{"command": "challenge", "args": {"target": "tm.example.com", "path": "/admin\n"}}'
+check "a path ending in a newline exits 2" "2 cf: '/admin\n' is not a path starting with /" "$CODE $ERR"
+check "a path ending in a newline sends no write" "" "$(since_mark | grep -v '^GET')"
+mark
+cfwj '{"command": "rate-limit", "args": {"target": "tm.example.com", "requests": 5, "path": "/api\n"}}'
+check "rate-limit refuses a path ending in a newline" "2 cf: '/api\n' is not a path starting with /" "$CODE $ERR"
+check "rate-limit with a path ending in a newline sends no write" "" "$(since_mark | grep -v '^GET')"
 
 reset
 cfw allow-only-countries tm.example.com fr

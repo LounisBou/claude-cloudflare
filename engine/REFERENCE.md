@@ -174,7 +174,8 @@ protections share the five slots of a Free zone.
 ## Protections
 
 A target is a host of one of the account's zones (`tm.example.com`), or a
-zone's name for the whole zone. Every write below reads the zone's whole
+zone's name for the whole zone; a wildcard host (`*.example.com`) exits 2, as
+a rule on `http.host` never matches it: target the zone instead. Every write below reads the zone's whole
 entrypoint, changes only the rule it targets and puts the whole list back, so
 rules made in the dashboard stay as they were; it saves the entrypoint first
 (`backup: <path>`, kind `ruleset`) and `restore` replays it. A rule that

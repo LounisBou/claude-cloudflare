@@ -13,9 +13,9 @@ import re
 
 from . import errors, quotas, rulesets, zones
 
-_HOST = re.compile(r"^[a-z0-9*]([a-z0-9*.-]*[a-z0-9])?$")
+_HOST = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 _COUNTRY = re.compile(r"^[A-Z]{2}$|^T1$")
-_PATH = re.compile(r"^/[A-Za-z0-9._~/%+-]*$")
+_PATH = re.compile(r"/[A-Za-z0-9._~/%+-]*")
 # Cloudflare refuses an expression past 4,096 characters.
 _MAX_EXPRESSION = 4000
 MANAGED_IDS = {
@@ -33,6 +33,8 @@ def resolve(ctx, target):
     """(zone, host) of a target: a host of one of the account's zones, or a
     zone's name for the whole zone (host None)."""
     name = target.strip().lower().rstrip(".")
+    if "*" in name:
+        raise errors.UsageError("%s: a rule on http.host never matches a wildcard; target the zone instead" % name)
     if not _HOST.match(name):
         raise errors.UsageError("%s is not a host or a zone name" % target)
     params = {"account.id": ctx.account.account_id} if ctx.account.account_id else None
@@ -69,8 +71,8 @@ def _host_clause(host):
 def _path_clause(path):
     if path is None:
         return None
-    if not _PATH.match(path):
-        raise errors.UsageError("%s is not a path starting with /" % path)
+    if not _PATH.fullmatch(path):
+        raise errors.UsageError("%r is not a path starting with /" % path)
     return 'starts_with(http.request.uri.path, "%s")' % path
 
 
