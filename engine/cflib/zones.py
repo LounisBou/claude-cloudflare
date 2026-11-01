@@ -2,7 +2,7 @@
 
 import re
 
-from . import errors, fmt
+from . import accounts, errors, fmt
 
 _ZONE_ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -18,8 +18,9 @@ def find(ctx, zone):
 
 
 def zones(args, ctx):
-    params = {"account.id": ctx.account.account_id} if ctx.account.account_id else None
-    found = ctx.api.get("/zones", params=params) or []
+    # Filtered on the account, so a token that sees several never lists
+    # another account's zones as this one's.
+    found = ctx.api.get("/zones", params={"account.id": accounts.account_id(ctx)}) or []
     if args.json:
         return fmt.as_json(found)
     rows = [{"name": z.get("name"), "id": z.get("id"), "status": z.get("status"),

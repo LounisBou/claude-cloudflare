@@ -67,6 +67,8 @@ name: relative to the zone (`www`, `@` for the apex) or whole
 
 ### `zones` (read)
 
+The account's zones only, filtered on its account id; a token that sees
+several accounts needs `<NAME>_CLOUDFLARE_ACCOUNT_ID` (exit 4 without it).
 Columns: `name id status plan`.
 
 ### `dns-list <zone> [--type T] [--name N]` (read)

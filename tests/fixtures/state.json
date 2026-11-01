@@ -2,7 +2,8 @@
   "page_size": 2,
   "tokens": {
     "cf-fixture-token-alpha-7f3a9c2e": {"token_id": "tok-alpha", "accounts": ["acc-alpha"], "expires_on": null},
-    "cf-fixture-token-beta-41d08b6a": {"token_id": "tok-beta", "accounts": ["acc-beta"], "expires_on": "2027-01-01T00:00:00Z"}
+    "cf-fixture-token-beta-41d08b6a": {"token_id": "tok-beta", "accounts": ["acc-beta"], "expires_on": "2027-01-01T00:00:00Z"},
+    "cf-fixture-token-gamma-9b2e5d17": {"token_id": "tok-gamma", "accounts": ["acc-alpha", "acc-gamma"], "expires_on": null}
   },
   "zones": [
     {
@@ -46,6 +47,14 @@
       "records": [
         {"type": "A", "name": "example.edu", "content": "203.0.113.20"}
       ]
+    },
+    {
+      "id": "44444444444444444444444444444444",
+      "name": "example.io",
+      "status": "active",
+      "plan": {"name": "Free Website"},
+      "account": {"id": "acc-gamma"},
+      "records": []
     }
   ]
 }

@@ -49,6 +49,8 @@ check_contains() {
 
 TOKEN_ALPHA=cf-fixture-token-alpha-7f3a9c2e
 TOKEN_BETA=cf-fixture-token-beta-41d08b6a
+# Gamma's token sees two accounts, alpha's and its own.
+TOKEN_GAMMA=cf-fixture-token-gamma-9b2e5d17
 
 # A second server on another port is where a redirect points: it must never
 # be reached.
@@ -216,7 +218,8 @@ cf zones
 check "zones folds every page" \
   "$(printf 'name\tid\tstatus\tplan\nexample.com\t0123456789abcdef0123456789abcdef\tactive\tFree Website\nexample.net\t11111111111111111111111111111111\tactive\tFree Website\nexample.org\t22222222222222222222222222222222\tpending\tPro Website')" \
   "$OUT"
-check "zones reads the second page" "$(printf 'GET /zones\nGET /zones?page=2')" "$(sent)"
+check "zones reads the second page" \
+  "$(printf 'GET /accounts\nGET /zones?account.id=acc-alpha\nGET /zones?account.id=acc-alpha&page=2')" "$(sent)"
 
 cf zones --json
 check "zones --json gives full objects" "3 acc-alpha" \
@@ -236,6 +239,13 @@ check_contains "a list with pages left past the limit says so" "pages: refused r
 reset
 EXTRA_ENV="ALPHA_CLOUDFLARE_ACCOUNT_ID=acc-alpha" cf zones
 check "a known account id filters the zones" "GET /zones?account.id=acc-alpha" "$(sent | head -1)"
+
+EXTRA_ENV="GAMMA_CLOUDFLARE_API_TOKEN=$TOKEN_GAMMA GAMMA_CLOUDFLARE_ACCOUNT_ID=acc-gamma" cf zones --account gamma
+check "a token that sees two accounts lists only its account's zones" \
+  "$(printf 'name\tid\tstatus\tplan\nexample.io\t44444444444444444444444444444444\tactive\tFree Website')" "$OUT"
+EXTRA_ENV="GAMMA_CLOUDFLARE_API_TOKEN=$TOKEN_GAMMA" cf zones --account gamma
+check "a token that sees two accounts and no account id exits 4" \
+  "4 cf: the token of gamma sees 2 accounts: set GAMMA_CLOUDFLARE_ACCOUNT_ID" "$CODE $ERR"
 
 EXTRA_ENV="ALPHA_CLOUDFLARE_API_TOKEN=cf-wrong" cf zones
 check "an API failure exits 3" "3" "$CODE"
@@ -613,9 +623,9 @@ cf zones
 check "a token echoed back by the API is masked" "cf: Cloudflare 9999: bad header Bearer [token]" "$ERR"
 
 check "no output of the engine holds a fixture token" "0" \
-  "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA" "$CAPTURED")"
+  "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$CAPTURED")"
 check "no backup holds a fixture token" "" \
-  "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA" "$WORK/backups" 2>/dev/null)"
+  "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$WORK/backups" 2>/dev/null)"
 check "the engine prints no traceback" "0" "$(grep -c 'Traceback' "$CAPTURED")"
 
 echo "== the mod and the engine agree =="
