@@ -25,6 +25,7 @@ trap stop EXIT
 
 pass=0
 fail=0
+skip=0
 
 # check <name> <expected> <actual>
 check() {
@@ -195,6 +196,7 @@ printf '{"env_files": ["~/.nothing"]}\n' > "$WORK/noaccount.json"
 env -i PATH="$PATH" HOME="$HOMEDIR" CLAUDE_CLOUDFLARE_CONFIG="$WORK/noaccount.json" CF_API_BASE="$API" \
   python3 "$ENGINE/cf.py" zones >"$WORK/out" 2>"$WORK/err"
 check "no account at all exits 4" "4" "$?"
+cat "$WORK/out" "$WORK/err" >> "$CAPTURED"
 check "no account at all says where tokens are read" \
   "cf: no Cloudflare account: set <NAME>_CLOUDFLARE_API_TOKEN in the environment or in an env file (~/.nothing)" \
   "$(cat "$WORK/err")"
@@ -621,9 +623,10 @@ reset
 fail_next GET /zones 400 9999 "bad header Bearer $TOKEN_ALPHA"
 cf zones
 check "a token echoed back by the API is masked" "cf: Cloudflare 9999: bad header Bearer [token]" "$ERR"
+fail_next GET /zones 400 9999 "bad header Bearer $TOKEN_BETA"
+EXTRA_ENV="BETA_CLOUDFLARE_ACCOUNT_ID=acc-beta" cf zones --account beta
+check "the second account's token echoed back is masked" "cf: Cloudflare 9999: bad header Bearer [token]" "$ERR"
 
-check "no output of the engine holds a fixture token" "0" \
-  "$(grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$CAPTURED")"
 check "no backup holds a fixture token" "" \
   "$(grep -rlE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA" "$WORK/backups" 2>/dev/null)"
 check "the engine prints no traceback" "0" "$(grep -c 'Traceback' "$CAPTURED")"
@@ -663,8 +666,15 @@ if command -v claude >/dev/null 2>&1; then
   check "the mod's tests pass (claude plugin test)" "0" "$mod_code"
 else
   echo "  skip the mod's tests: claude is not on PATH"
+  skip=$((skip + 1))
 fi
 
+echo "== no output holds a token =="
+
+# Every output the engine printed, and the mod's test log.
+check "no output of the engine or of the mod holds a fixture token" "0" \
+  "$(cat "$CAPTURED" "$WORK/mod.log" 2>/dev/null | grep -cE "$TOKEN_ALPHA|$TOKEN_BETA|$TOKEN_GAMMA")"
+
 echo
-echo "$pass passed, $fail failed"
+echo "$pass passed, $fail failed, $skip skipped"
 [ "$fail" -eq 0 ]

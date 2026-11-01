@@ -151,6 +151,20 @@ test('a deny verdict refuses the call without running the engine', async ($, on)
   expect(runs.length).toBe(0)
 })
 
+test('a deny rule on a write refuses it without a dialog or a run', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'deny', reason: 'denied by mcp__cloudflare__cf(dns-delete)', rule: 'mcp__cloudflare__cf' })
+  stubAsk(on, asked, 'Allow')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  const out: any = await call($, 'dns-delete', { zone: 'example.com', record: 'www' })
+  expect(JSON.stringify(out)).toContain('denied by mcp__cloudflare__cf(dns-delete)')
+  expect(out.result).toBeUndefined()
+  expect(asked.length).toBe(0)
+  expect(runs.length).toBe(0)
+})
+
 test('an allow verdict runs a write without a dialog', async ($, on) => {
   const runs: any[] = []
   const asked: string[] = []
@@ -235,9 +249,9 @@ test('a write that needs permission is refused when nobody can be asked', async 
   const runs: any[] = []
   await stubMod(on, runs, undefined, { decision: 'ask' })
   stubAsk(on, [], undefined)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.session.start({ surface: 'terminal', isInteractive: false, cwd: '/work' })
 
-  for (const command of ['dns-create', 'restore']) {
+  for (const command of ['dns-create', ...NEVER_GRANTED]) {
     const out: any = await call($, command)
     expect(JSON.stringify(out)).toContain('cf ' + command + ' needs permission and nobody could be asked')
   }
