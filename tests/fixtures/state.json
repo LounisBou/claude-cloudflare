@@ -1,0 +1,60 @@
+{
+  "page_size": 2,
+  "tokens": {
+    "cf-fixture-token-alpha-7f3a9c2e": {"token_id": "tok-alpha", "accounts": ["acc-alpha"], "expires_on": null},
+    "cf-fixture-token-beta-41d08b6a": {"token_id": "tok-beta", "accounts": ["acc-beta"], "expires_on": "2027-01-01T00:00:00Z"},
+    "cf-fixture-token-gamma-9b2e5d17": {"token_id": "tok-gamma", "accounts": ["acc-alpha", "acc-gamma"], "expires_on": null}
+  },
+  "zones": [
+    {
+      "id": "0123456789abcdef0123456789abcdef",
+      "name": "example.com",
+      "status": "active",
+      "plan": {"name": "Free Website"},
+      "account": {"id": "acc-alpha"},
+      "records": [
+        {"type": "A", "name": "example.com", "content": "203.0.113.10", "proxied": true},
+        {"type": "A", "name": "www.example.com", "content": "203.0.113.10", "proxied": true},
+        {"type": "CNAME", "name": "app.example.com", "content": "www.example.com", "proxied": true},
+        {"type": "MX", "name": "example.com", "content": "mail.example.com", "priority": 10, "ttl": 3600},
+        {"type": "TXT", "name": "example.com", "content": "v=spf1 -all"},
+        {"type": "TXT", "name": "multi.example.com", "content": "one"},
+        {"type": "TXT", "name": "multi.example.com", "content": "two"}
+      ]
+    },
+    {
+      "id": "11111111111111111111111111111111",
+      "name": "example.net",
+      "status": "active",
+      "plan": {"name": "Free Website"},
+      "account": {"id": "acc-alpha"},
+      "records": []
+    },
+    {
+      "id": "22222222222222222222222222222222",
+      "name": "example.org",
+      "status": "pending",
+      "plan": {"name": "Pro Website"},
+      "account": {"id": "acc-alpha"},
+      "records": []
+    },
+    {
+      "id": "33333333333333333333333333333333",
+      "name": "example.edu",
+      "status": "active",
+      "plan": {"name": "Free Website"},
+      "account": {"id": "acc-beta"},
+      "records": [
+        {"type": "A", "name": "example.edu", "content": "203.0.113.20"}
+      ]
+    },
+    {
+      "id": "44444444444444444444444444444444",
+      "name": "example.io",
+      "status": "active",
+      "plan": {"name": "Free Website"},
+      "account": {"id": "acc-gamma"},
+      "records": []
+    }
+  ]
+}

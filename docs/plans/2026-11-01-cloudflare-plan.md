@@ -26,7 +26,8 @@ attribution, no mention of phases/agents/orchestrator in code, commits or PR tex
   assert it (grep of every captured output for the fixture token).
 - Output: compact text by default (one line per object, `\t`-separated, no JSON); `--json` on every
   read command for full objects. Errors: one line `cf: <message>` on stderr.
-- Exit codes (contract, all phases): `0` ok · `2` usage · `3` Cloudflare API error · `4`
+- Exit codes (contract, all phases): `0` ok · `1` internal error (one redacted line,
+  `cf: internal error: <exception type>`, never a traceback) · `2` usage · `3` Cloudflare API error · `4`
   config/credentials · `5` refused by plan/quota or by a safety guard · `6` Caddy change rolled back ·
   `7` Caddy not alive after reload and rollback failed (operator must look).
 - Quality gate per phase: `bash tests/run-tests.sh` green (engine), mod tests green (same runner as
