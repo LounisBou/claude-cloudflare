@@ -11,7 +11,8 @@ Control endpoints, outside the API: POST /__reset restores the initial state
 and empties the log, GET /__log returns the log, POST /__fail makes the next
 request matching {"method", "path"} answer {"status", "code", "message"},
 or, given {"location"} instead, answer {"status"} with that Location header,
-or, given {"raw"}, write those bytes as the whole answer.
+or, given {"raw"}, write those bytes as the whole answer. POST /__pages
+{"total_pages"} makes every list claim that many pages until the next reset.
 
     server.py <state.json> <port file>   binds 127.0.0.1 on a free port
 """
@@ -45,6 +46,7 @@ class State:
                 self.add_record(zone, rec)
         self.log = []
         self.fail = []
+        self.total_pages = None
 
     def add_record(self, zone, rec):
         rec = dict(rec)
@@ -112,6 +114,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, state.log)
         if url.path == "/__fail":
             state.fail.append(body)
+            return self._send(200, {"ok": True})
+        if url.path == "/__pages":
+            state.total_pages = body["total_pages"]
             return self._send(200, {"ok": True})
 
         state.log.append({"method": method, "path": url.path, "query": query, "body": body})
@@ -234,7 +239,7 @@ class Problem(Exception):
 def page(state, items, query):
     per_page = min(int(query.get("per_page", state.page_size)), state.page_size)
     number = int(query.get("page", 1))
-    total_pages = max(1, -(-len(items) // per_page))
+    total_pages = state.total_pages or max(1, -(-len(items) // per_page))
     chunk = items[(number - 1) * per_page:number * per_page]
     info = {"page": number, "per_page": per_page, "count": len(chunk),
             "total_count": len(items), "total_pages": total_pages}

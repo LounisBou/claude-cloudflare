@@ -20,7 +20,9 @@ API = "https://api.cloudflare.com/client/v4"
 _TIMEOUT = 30
 _MAX_RETRIES = 3
 # Pages are read until Cloudflare's total_pages, and never past this, so a
-# server that keeps answering pages cannot hold the engine in a loop.
+# server that keeps answering pages cannot hold the engine in a loop. A list
+# with pages left past it fails whole: a part of it could be backed up and
+# restored as if it were all.
 _MAX_PAGES = 500
 
 # The default handlers but the redirect one: a redirect would carry the
@@ -81,6 +83,8 @@ class Api:
             cursor = info.get("cursor") if chunk else None
             total = info.get("total_pages") or total
             pages += 1
+        if page < total or cursor:
+            raise errors.ApiError("%s holds more than %d pages: refused rather than cut" % (path, _MAX_PAGES))
         return items
 
     def post(self, path, body=None, params=None):

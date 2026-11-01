@@ -225,6 +225,14 @@ check "zones --json gives full objects" "3 acc-alpha" \
 cf zones --account beta
 check "each account sees its own zones" "example.edu" "$(printf '%s\n' "$OUT" | sed -n 2p | cut -f1)"
 
+# A list longer than the engine reads is refused, not cut: a backup made of
+# part of a name's records would have a later restore delete the rest.
+reset
+curl -fsS -X POST "http://127.0.0.1:$PORT/__pages" -H 'Content-Type: application/json' -d '{"total_pages": 100000}' >/dev/null
+cf dns-list example.com
+check "a list with pages left past the limit exits 3, printing nothing" "3 " "$CODE $OUT"
+check_contains "a list with pages left past the limit says so" "pages: refused rather than cut" "$ERR"
+
 reset
 EXTRA_ENV="ALPHA_CLOUDFLARE_ACCOUNT_ID=acc-alpha" cf zones
 check "a known account id filters the zones" "GET /zones?account.id=acc-alpha" "$(sent | head -1)"
