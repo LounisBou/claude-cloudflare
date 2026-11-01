@@ -814,11 +814,34 @@ r = [x for x in json.load(sys.stdin) if x["method"] == "PUT"][-1]["body"]["rules
 print(r["period"], r["requests_per_period"], r["mitigation_timeout"])')"
 cfw rate-limit api.example.com --requests 5
 check "a second rate limit on Free exits 5 naming the plan and the full quota" "5 cf: plan Free Website: rate limiting rules quota is full (1 of 1)" "$CODE $ERR"
+mark
+cfw rate-limit tm.example.com --requests 20 --timeout 600
+check "a Free zone mitigates for 10 seconds only" "5 cf: plan Free Website: the mitigation timeout takes 10 seconds only" "$CODE $ERR"
+check "a refused mitigation timeout sent no change" "" "$(since_mark | grep -v '^GET')"
 cfw rate-limit example.org --requests 5
+check "a Pro zone counts over 60 seconds and mitigates for 600 by default" "60 5 600" "$(curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+r = [x for x in json.load(sys.stdin) if x["method"] == "PUT"][-1]["body"]["rules"][-1]["ratelimit"]
+print(r["period"], r["requests_per_period"], r["mitigation_timeout"])')"
 cfw rate-limit www.example.org --requests 5 --period 60 --timeout 3600 --path /api
 check "a Pro zone counts over a minute" "ratelimit" "$(printf '%s\n' "$OUT" | head -1 | cut -f2)"
+mark
 cfw rate-limit www.example.org --requests 5 --period 120
 check "a Pro zone refuses two minutes" "5" "$CODE"
+check "a Pro zone names the periods it counts over" \
+  "cf: plan Pro Website: rate limiting counts over 10, 15, 20, 30, 40, 45, 60 seconds only" "$ERR"
+check "a refused period sent no change" "" "$(since_mark | grep -v '^GET')"
+mark
+cfw rate-limit www.example.org --requests 5 --period 30 --timeout 25
+check "a Pro zone refuses a mitigation timeout Cloudflare does not take" \
+  "5 cf: plan Pro Website: the mitigation timeout takes 10, 15, 20, 30, 40, 45, 60, 90, 120, 180, 240, 300, 480, 600, 900, 1200, 1800, 2400, 3600 seconds only" "$CODE $ERR"
+check "a refused mitigation timeout on Pro sent no change" "" "$(since_mark | grep -v '^GET')"
+reset
+cfw rate-limit www.example.org --requests 5 --period 30 --timeout 1800
+check "a Pro zone counts over any period it takes up to a minute" "30 1800" "$(curl -fsS "http://127.0.0.1:$PORT/__log" | python3 -c '
+import json, sys
+r = [x for x in json.load(sys.stdin) if x["method"] == "PUT"][-1]["body"]["rules"][-1]["ratelimit"]
+print(r["period"], r["mitigation_timeout"])')"
 
 reset
 cfw managed-rules example.com on
@@ -944,7 +967,7 @@ cfwj '{"command": "ip-block", "account": "beta", "args": {"zone": "example.edu",
 check "e2e: ip-block takes an IPv6 address as an ip6 target" "created	block	ip6	2001:db8:abcd::1" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
 e2e_v6_bk=$(backup_of)
 cfj '{"command": "ip-rules", "account": "beta", "args": {"zone": "example.edu"}}'
-check "e2e: ip-rules shows both IPv6 rules" "$(printf 'block\tip_range\t2001:db8:abcd::/48\nblock\tip6\t2001:db8:abcd::1')" "$(col 1-3)"
+check "e2e: ip-rules shows both IPv6 rules" "$(printf 'block\tip6\t2001:db8:abcd::1\nblock\tip_range\t2001:db8:abcd::/48')" "$(col 1-3 | LC_ALL=C sort)"
 cfwj "{\"command\": \"restore\", \"account\": \"beta\", \"args\": {\"path\": \"$e2e_v6_bk\"}}"
 check "e2e: restore from the ip6 rule's backup deletes it" "deleted	block	ip6	2001:db8:abcd::1" "$(printf '%s\n' "$OUT" | head -1 | cut -f1-4)"
 cfj '{"command": "ip-rules", "account": "beta", "args": {"zone": "example.edu"}}'

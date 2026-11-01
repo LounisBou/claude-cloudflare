@@ -9,15 +9,27 @@ Enterprise column: the API still has the last word.
 
 from . import errors
 
+# The seconds a rate limiting rule counts over and mitigates for take these
+# values only, each plan up to its own maximum
+# (developers.cloudflare.com/waf/rate-limiting-rules/, availability by plan).
+RATE_PERIODS = (10, 15, 20, 30, 40, 45, 60, 90, 120, 180, 240, 300, 480, 600, 900, 1200, 1800, 2400, 3600,
+                65535, 86400)
+
+
+def _upto(top):
+    return tuple(p for p in RATE_PERIODS if p <= top)
+
+
+# Enterprise sets any mitigation timeout up to a day through the API: None.
 QUOTAS = {
     "free": {"custom_rules": 5, "rate_limit_rules": 1, "managed": ("free",), "bot": "bot-fight-mode",
-             "periods": (10,), "timeout_max": 10},
+             "periods": _upto(10), "timeouts": _upto(10)},
     "pro": {"custom_rules": 20, "rate_limit_rules": 2, "managed": ("free", "cloudflare", "owasp"),
-            "bot": "super-bot-fight-mode", "periods": (10, 60), "timeout_max": 3600},
+            "bot": "super-bot-fight-mode", "periods": _upto(60), "timeouts": _upto(3600)},
     "business": {"custom_rules": 100, "rate_limit_rules": 5, "managed": ("free", "cloudflare", "owasp"),
-                 "bot": "super-bot-fight-mode", "periods": (10, 60, 120, 300, 600), "timeout_max": 86400},
+                 "bot": "super-bot-fight-mode", "periods": _upto(600), "timeouts": _upto(86400)},
     "enterprise": {"custom_rules": 1000, "rate_limit_rules": 100, "managed": ("free", "cloudflare", "owasp"),
-                   "bot": "bot-management", "periods": None, "timeout_max": 86400},
+                   "bot": "bot-management", "periods": _upto(65535), "timeouts": None},
 }
 # Log is a custom-rule action of Enterprise only.
 LOG_PLANS = ("enterprise",)

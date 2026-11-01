@@ -212,8 +212,13 @@ Challenges the visitors of a host, narrowed to a path prefix and to countries.
 
 ### `rate-limit <target> --requests N [--period S] [--timeout S] [--path P] [--action block|challenge|js_challenge|managed_challenge]` (write)
 
-A rate limiting rule (per IP and data centre). Free counts over 10 seconds
-and mitigates for 10; Pro over 10 or 60; Business up to 600. Never merged.
+A rate limiting rule (per IP and data centre). The period and the timeout
+take Cloudflare's values only (10, 15, 20, 30, 40, 45, 60, 90, 120, 180, 240,
+300, 480, 600, 900, 1200, 1800, 2400, 3600, 65535, 86400), up to the plan's
+maximum: Free counts over 10 seconds and mitigates for 10; Pro counts up to
+60 and mitigates up to 3600; Business up to 600 and 86400; Enterprise counts
+up to 65535 and mitigates for any time up to 86400. Defaults: a period of 60
+and a timeout of 600 where the plan allows them, else 10. Never merged.
 
 ### `managed-rules <zone> on|off [--ruleset free|cloudflare|owasp]` (write)
 

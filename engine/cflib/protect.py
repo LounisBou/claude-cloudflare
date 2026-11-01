@@ -167,12 +167,19 @@ def challenge(args, ctx):
 def rate_limit(args, ctx):
     zone, host = resolve(ctx, args.target)
     limits = quotas.limits(zone)
-    period = args.period if args.period is not None else (60 if limits["periods"] is None or 60 in limits["periods"] else 10)
-    if limits["periods"] is not None and period not in limits["periods"]:
-        quotas.refuse(zone, "rate limiting counts over %s seconds only" % ", ".join(map(str, limits["periods"])))
-    timeout = args.timeout if args.timeout is not None else min(600, limits["timeout_max"])
-    if not 10 <= timeout <= limits["timeout_max"]:
-        quotas.refuse(zone, "the mitigation timeout goes from 10 to %d seconds" % limits["timeout_max"])
+    periods, timeouts = limits["periods"], limits["timeouts"]
+    period = args.period if args.period is not None else (60 if 60 in periods else 10)
+    if period not in periods:
+        quotas.refuse(zone, "rate limiting counts over %s seconds only" % ", ".join(map(str, periods)))
+    if args.timeout is not None:
+        timeout = args.timeout
+    else:
+        timeout = 600 if timeouts is None else max(t for t in timeouts if t <= 600)
+    if timeouts is None:
+        if not 10 <= timeout <= quotas.RATE_PERIODS[-1]:
+            quotas.refuse(zone, "the mitigation timeout goes from 10 to %d seconds" % quotas.RATE_PERIODS[-1])
+    elif timeout not in timeouts:
+        quotas.refuse(zone, "the mitigation timeout takes %s seconds only" % ", ".join(map(str, timeouts)))
     if args.requests < 1:
         raise errors.UsageError("--requests must be at least 1")
     expr = expression(_host_clause(host), _path_clause(args.path))
@@ -255,7 +262,7 @@ def register(subparsers):
     parser.add_argument("target", help="a host, or a zone name for the whole zone")
     parser.add_argument("--requests", type=int, required=True, help="requests allowed per period")
     parser.add_argument("--period", type=int, help="seconds counted (default: 60 where the plan allows it, else 10)")
-    parser.add_argument("--timeout", type=int, help="seconds the visitor stays mitigated")
+    parser.add_argument("--timeout", type=int, help="seconds the visitor stays mitigated (default: 600 where the plan allows it, else 10)")
     parser.add_argument("--path", help="only paths starting with this")
     parser.add_argument("--action", choices=RATE_ACTIONS, default="block")
     parser.set_defaults(handler=rate_limit)
