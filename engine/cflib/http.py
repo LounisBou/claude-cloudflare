@@ -6,6 +6,7 @@ a call returns its "result", lists are read page after page and returned
 whole, and "success": false raises ApiError with Cloudflare's own codes.
 """
 
+import http.client
 import json
 import os
 import time
@@ -136,3 +137,6 @@ def _send(method, url, data, headers):
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         raise errors.ApiError("cannot reach the Cloudflare API at %s: %s" % (base_url(), reason))
+    except (http.client.HTTPException, ValueError) as exc:
+        # Named by its type alone: its text can quote whatever was sent or read.
+        raise errors.ApiError("cannot read the Cloudflare API's answer at %s: %s" % (base_url(), type(exc).__name__))

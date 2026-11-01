@@ -228,6 +228,13 @@ check "an unreachable API is one line" "1" "$(printf '%s\n' "$ERR" | wc -l | tr 
 check_contains "an unreachable API names the failure" "cf: cannot reach the Cloudflare API" "$ERR"
 
 reset
+curl -fsS -X POST "http://127.0.0.1:$PORT/__fail" -H 'Content-Type: application/json' \
+  -d '{"method":"GET","path":"/zones","raw":"NOT HTTP\r\n\r\n"}' >/dev/null
+cf zones
+check "an answer that is not HTTP exits 3, one line" "3 1" "$CODE $(printf '%s\n' "$ERR" | wc -l | tr -d ' ')"
+check_contains "an answer that is not HTTP names the API" "cf: cannot read the Cloudflare API's answer" "$ERR"
+
+reset
 curl -fsS -X POST "http://127.0.0.1:$OTHER_PORT/__reset" >/dev/null
 redirect_next GET /zones 302 "http://127.0.0.1:$OTHER_PORT/client/v4/zones"
 cf zones
@@ -260,6 +267,9 @@ cfj '{"command": "zones", "args": {"json": "yes"}}'
 check "stdin json refuses a flag value of the wrong type" "2" "$CODE"
 cfj 'nope'
 check "stdin that is not JSON exits 2" "2" "$CODE"
+printf '{"command": "dns-get", "args": {"zone": "ex\377ample.com", "record": "www"}}' > "$WORK/stdin"
+STDIN="$WORK/stdin" run cf.py --stdin-json
+check "stdin that is not UTF-8 exits 2, one line" "2 cf: stdin is not UTF-8" "$CODE $ERR"
 cfj '{"command": "rm -rf"}'
 check "stdin json refuses an unknown command" "2 cf: unknown command: rm -rf" "$CODE $ERR"
 cfj '{"command": "zones", "account": 3}'
@@ -444,6 +454,12 @@ cfw restore "$WORK/outside.json"
 check "restore refuses a file outside the backups" "2" "$CODE"
 cfw restore "$WORK/backups/alpha/example.com/none-dns.json"
 check "restore of a missing backup exits 2" "2" "$CODE"
+mkdir -p "$WORK/backups/alpha/broken.example"
+printf '{"account": "alpha", "zone": "broken.example", "kind": "dns", "data": {}}' \
+  > "$WORK/backups/alpha/broken.example/20260101T000000.000000Z-dns.json"
+cfw restore "$WORK/backups/alpha/broken.example/20260101T000000.000000Z-dns.json"
+check "a malformed backup is an internal error, one line, no traceback" "1 cf: internal error: KeyError" "$CODE $ERR"
+rm -r "$WORK/backups/alpha/broken.example"
 cfw restore "$delete_bk" --account beta
 check "restore refuses another account than the backup's" "2 cf: $delete_bk belongs to account alpha, not beta" "$CODE $ERR"
 

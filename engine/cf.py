@@ -96,7 +96,11 @@ def main(argv, writes=False):
     try:
         if argv == ["--stdin-json"]:
             try:
-                request = json.loads(sys.stdin.read())
+                text = sys.stdin.buffer.read().decode("utf-8")
+            except UnicodeDecodeError:
+                raise errors.UsageError("stdin is not UTF-8")
+            try:
+                request = json.loads(text)
             except ValueError as exc:
                 raise errors.UsageError("stdin is not valid JSON: %s" % exc)
             argv = stdinjson.build_argv(build_parser(), request)
@@ -105,10 +109,14 @@ def main(argv, writes=False):
         except errors.CfError:
             secrets = creds.secrets([])
         out = run(argv, writes)
+        if out:
+            print(_redact(out, secrets))
     except errors.CfError as exc:
         return _fail(exc, secrets)
-    if out:
-        print(_redact(out, secrets))
+    except Exception as exc:
+        # Never a traceback: it could quote a token, and the caller reads one
+        # line. The type alone says where to look.
+        return _fail(errors.CfError("internal error: %s" % type(exc).__name__), secrets)
     return 0
 
 

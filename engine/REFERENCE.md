@@ -33,6 +33,7 @@ on stderr.
 | Exit | Meaning |
 |---|---|
 | `0` | ok |
+| `1` | internal error: `cf: internal error: <exception type>`, never a traceback |
 | `2` | usage: unknown command or argument, a write sent to `cf.py`, no such zone or record |
 | `3` | Cloudflare API error (`cf: Cloudflare <code>: <message>`), or the API unreachable |
 | `4` | config or credentials: no account, unknown account, invalid config, backup not writable |
