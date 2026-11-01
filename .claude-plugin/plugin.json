@@ -1,7 +1,7 @@
 {
   "name": "cloudflare",
   "description": "Cloudflare from a native Claude Code tool: accounts by name, zones and DNS records with a backup before every write, facading a Python stdlib engine.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Lounis Bou",

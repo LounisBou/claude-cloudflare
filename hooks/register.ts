@@ -8,12 +8,17 @@
 export const COMMANDS = [
   'auth-check', 'accounts', 'zones', 'dns-list', 'dns-get', 'dns-export', 'backups',
   'dns-create', 'dns-update', 'dns-delete', 'restore',
+  'settings', 'certs', 'plan', 'rules', 'ip-rules', 'security',
+  'setting-set', 'universal-ssl', 'rule-add', 'rule-update', 'rule-delete', 'block-countries',
+  'allow-only-countries', 'rate-limit', 'challenge', 'managed-rules', 'ip-allow', 'ip-block',
+  'ip-rule-delete', 'bot-fight', 'security-level', 'under-attack',
 ]
 
 // The commands that only read. Every other one writes to Cloudflare, and a
 // command missing here is treated as a write, so the safe side is the default.
 export const READS = new Set([
   'auth-check', 'accounts', 'zones', 'dns-list', 'dns-get', 'dns-export', 'backups',
+  'settings', 'certs', 'plan', 'rules', 'ip-rules', 'security',
 ])
 
 // The writes no session grant covers, asked each time: a deletion, a replay

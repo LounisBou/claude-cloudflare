@@ -10,8 +10,11 @@
       "id": "0123456789abcdef0123456789abcdef",
       "name": "example.com",
       "status": "active",
-      "plan": {"name": "Free Website"},
+      "plan": {"name": "Free Website", "legacy_id": "free"},
       "account": {"id": "acc-alpha"},
+      "rulesets": {"http_request_firewall_custom": [{"id": "da5b0a4d000000000000000000000c01", "action": "block", "expression": "(http.request.uri.path contains \"/wp-login.php\")", "description": "dashboard: no wp-login", "enabled": true}]},
+      "ip_rules": [{"id": "da5b0a4d000000000000000000000i01", "mode": "block", "configuration": {"target": "ip", "value": "198.51.100.7"}, "notes": "dashboard"}],
+      "cert_packs": [{"id": "pack-1", "type": "universal", "hosts": ["example.com", "*.example.com"], "status": "active", "certificate_authority": "lets_encrypt", "validity_days": 90, "certificates": [{"id": "c1", "expires_on": "2027-01-30T00:00:00Z", "status": "active"}]}, {"id": "pack-2", "type": "advanced", "hosts": ["app.example.com"], "status": "pending_validation", "certificate_authority": "google", "validity_days": 90, "certificates": []}],
       "records": [
         {"type": "A", "name": "example.com", "content": "203.0.113.10", "proxied": true},
         {"type": "A", "name": "www.example.com", "content": "203.0.113.10", "proxied": true},
@@ -36,6 +39,7 @@
       "status": "pending",
       "plan": {"name": "Pro Website"},
       "account": {"id": "acc-alpha"},
+      "rulesets": {"http_ratelimit": [{"id": "da5b0a4d000000000000000000000r01", "action": "managed_challenge", "expression": "(http.request.uri.path eq \"/login\")", "description": "dashboard: slow logins", "enabled": true, "ratelimit": {"characteristics": ["cf.colo.id", "ip.src"], "period": 60, "requests_per_period": 30, "mitigation_timeout": 600}}], "http_request_firewall_managed": [{"id": "da5b0a4d000000000000000000000m01", "action": "skip", "expression": "(http.request.uri.path eq \"/health\")", "description": "dashboard: skip health checks", "enabled": false, "action_parameters": {"ruleset": "current"}}]},
       "records": []
     },
     {
@@ -44,6 +48,7 @@
       "status": "active",
       "plan": {"name": "Free Website"},
       "account": {"id": "acc-beta"},
+      "rulesets": {"http_request_firewall_custom": [{"id": "da5b0a4d000000000000000000000e01", "action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 1", "enabled": true}, {"id": "da5b0a4d000000000000000000000e02", "action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 2", "enabled": true}, {"id": "da5b0a4d000000000000000000000e03", "action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 3", "enabled": true}, {"id": "da5b0a4d000000000000000000000e04", "action": "managed_challenge", "expression": "(ip.src.country eq \"KP\")", "description": "dashboard: 4", "enabled": true}]},
       "records": [
         {"type": "A", "name": "example.edu", "content": "203.0.113.20"}
       ]

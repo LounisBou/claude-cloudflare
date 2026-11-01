@@ -4,7 +4,7 @@ description: |
   Use when making Cloudflare API calls and the mcp__cloudflare__cf tool is not
   in the tool list (a session where mods do not load: claude -p, an older
   Claude Code). Runs the same Python standard-library engine from Bash:
-  accounts, zones, DNS records, backups and restore.
+  accounts, zones, DNS records, zone settings, certificates, protections (rules, rate limiting, managed rules, IP access rules), backups and restore.
   WHEN: a Cloudflare call is needed and mcp__cloudflare__cf is unavailable.
   WHEN NOT: mcp__cloudflare__cf is available (use it).
 ---

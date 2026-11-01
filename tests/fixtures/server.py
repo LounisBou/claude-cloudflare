@@ -28,6 +28,12 @@ from urllib.parse import parse_qs, urlparse
 
 PREFIX = "/client/v4"
 PROXIABLE = ("A", "AAAA", "CNAME")
+PHASES = ("http_request_firewall_custom", "http_ratelimit", "http_request_firewall_managed")
+DEFAULT_SETTINGS = {
+    "ssl": "full", "min_tls_version": "1.2", "tls_1_3": "on", "always_use_https": "off",
+    "security_level": "medium", "browser_check": "on", "challenge_ttl": 1800,
+    "automatic_https_rewrites": "on",
+}
 
 
 class State:
@@ -41,12 +47,52 @@ class State:
         self.tokens = data["tokens"]
         self.zones = data["zones"]
         self.records = {}
+        self.settings = {}
+        self.rulesets = {}
+        self.ip_rules = {}
+        self.universal = {}
+        self.packs = {}
+        self.bot = {}
         for zone in self.zones:
             for rec in zone.pop("records", []):
                 self.add_record(zone, rec)
+            zid = zone["id"]
+            self.settings[zid] = dict(DEFAULT_SETTINGS, **zone.pop("settings", {}))
+            self.rulesets[zid] = {}
+            for phase, rules in zone.pop("rulesets", {}).items():
+                self.put_ruleset(zid, phase, rules)
+            self.ip_rules[zid] = {}
+            for rule in zone.pop("ip_rules", []):
+                self.add_ip_rule(zid, rule)
+            self.universal[zid] = {"enabled": True, **zone.pop("universal_ssl", {})}
+            self.packs[zid] = zone.pop("cert_packs", [])
+            self.bot[zid] = {"fight_mode": False, "enable_js": True, **zone.pop("bot", {})}
         self.log = []
         self.fail = []
         self.total_pages = None
+
+    def put_ruleset(self, zid, phase, rules):
+        old = self.rulesets[zid].get(phase)
+        stored = []
+        for rule in rules:
+            rule = dict(rule)
+            rule.setdefault("id", uuid.uuid4().hex)
+            rule.setdefault("enabled", True)
+            rule["version"] = "1"
+            rule["last_updated"] = "2026-01-01T00:00:00Z"
+            stored.append(rule)
+        self.rulesets[zid][phase] = {
+            "id": old["id"] if old else uuid.uuid4().hex, "name": "default", "kind": "zone",
+            "phase": phase, "version": "1", "rules": stored}
+        return self.rulesets[zid][phase]
+
+    def add_ip_rule(self, zid, rule):
+        rule = dict(rule)
+        rule.setdefault("id", uuid.uuid4().hex)
+        rule.setdefault("notes", "")
+        rule["created_on"] = "2026-01-01T00:00:00Z"
+        self.ip_rules[zid][rule["id"]] = rule
+        return rule
 
     def add_record(self, zone, rec):
         rec = dict(rec)
@@ -172,6 +218,35 @@ class Handler(BaseHTTPRequestHandler):
     def zone_route(self, state, zone, method, parts, query, body):
         if parts == [] and method == "GET":
             return 200, envelope(zone)
+        zid = zone["id"]
+        if parts == ["settings"] and method == "GET":
+            return 200, envelope([self.setting(k, v) for k, v in sorted(state.settings[zid].items())])
+        if len(parts) == 2 and parts[0] == "settings":
+            if parts[1] not in state.settings[zid]:
+                raise Problem(400, 1142, "Unknown setting %s" % parts[1])
+            if method == "PATCH":
+                if not isinstance(body, dict) or "value" not in body:
+                    raise Problem(400, 1007, "Invalid value for zone setting %s" % parts[1])
+                state.settings[zid][parts[1]] = body["value"]
+            return 200, envelope(self.setting(parts[1], state.settings[zid][parts[1]]))
+        if parts == ["ssl", "universal", "settings"]:
+            if method == "PATCH":
+                if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+                    raise Problem(400, 1007, "Invalid enabled")
+                state.universal[zid]["enabled"] = body["enabled"]
+            return 200, envelope(state.universal[zid])
+        if parts == ["ssl", "certificate_packs"] and method == "GET":
+            return 200, page(state, state.packs[zid], query)
+        if parts == ["bot_management"]:
+            if method == "PUT":
+                if not isinstance(body, dict):
+                    raise Problem(400, 1007, "Invalid body")
+                state.bot[zid].update(body)
+            return 200, envelope(state.bot[zid])
+        if len(parts) == 4 and parts[:2] == ["rulesets", "phases"] and parts[3] == "entrypoint":
+            return self.entrypoint(state, zid, parts[2], method, body)
+        if parts[:3] == ["firewall", "access_rules", "rules"]:
+            return self.access_rules(state, zid, method, parts[3:], query, body)
         if parts == ["dns_records", "export"] and method == "GET":
             lines = [";; fixture export of " + zone["name"]]
             for rec in self.zone_records(state, zone):
@@ -203,6 +278,58 @@ class Handler(BaseHTTPRequestHandler):
                 del state.records[rec["id"]]
                 new["id"] = rec["id"]
                 return 200, envelope(state.add_record(zone, new))
+        raise Problem(404, 7003, "No route for that URI")
+
+    def setting(self, key, value):
+        return {"id": key, "value": value, "editable": True, "modified_on": "2026-01-01T00:00:00Z"}
+
+    def entrypoint(self, state, zid, phase, method, body):
+        if phase not in PHASES:
+            raise Problem(400, 20012, "Unknown phase %s" % phase)
+        current = state.rulesets[zid].get(phase)
+        if method == "GET":
+            if current is None:
+                raise Problem(404, 10003, "could not find entrypoint ruleset in phase %s" % phase)
+            return 200, envelope(current)
+        if method == "PUT":
+            rules = (body or {}).get("rules")
+            if not isinstance(rules, list):
+                raise Problem(400, 20012, "rules must be a list")
+            for rule in rules:
+                if "version" in rule or "last_updated" in rule:
+                    raise Problem(400, 20012, "read-only field in rule")
+                if not rule.get("expression") or not rule.get("action"):
+                    raise Problem(400, 20012, "rule needs an expression and an action")
+            return 200, envelope(state.put_ruleset(zid, phase, rules))
+        raise Problem(405, 7003, "Method not allowed")
+
+    def access_rules(self, state, zid, method, parts, query, body):
+        rules = state.ip_rules[zid]
+        if parts == [] and method == "GET":
+            found = sorted(rules.values(), key=lambda r: r["created_on"] + r["id"])
+            if "mode" in query:
+                found = [r for r in found if r["mode"] == query["mode"]]
+            if "configuration.value" in query:
+                found = [r for r in found if r["configuration"]["value"] == query["configuration.value"]]
+            return 200, page(state, found, query)
+        if parts == [] and method == "POST":
+            conf = (body or {}).get("configuration") or {}
+            if (body or {}).get("mode") not in ("block", "challenge", "whitelist", "js_challenge", "managed_challenge") \
+                    or not conf.get("target") or not conf.get("value"):
+                raise Problem(400, 10001, "Invalid access rule")
+            if any(r["configuration"] == conf for r in rules.values()):
+                raise Problem(400, 10009, "firewallaccessrules.api.duplicate_of_existing")
+            return 200, envelope(state.add_ip_rule(zid, body))
+        if len(parts) == 1:
+            rule = rules.get(parts[0])
+            if rule is None:
+                raise Problem(404, 10001, "access rule not found")
+            if method == "DELETE":
+                del rules[rule["id"]]
+                return 200, envelope({"id": rule["id"]})
+            if method == "PATCH":
+                rule.update({k: v for k, v in (body or {}).items() if k in ("mode", "notes")})
+                return 200, envelope(rule)
         raise Problem(404, 7003, "No route for that URI")
 
     def zone_records(self, state, zone):

@@ -6,6 +6,7 @@ to its owner, holding {"account", "zone", "kind", "taken", "data"}. "data" is
 what the write is about to change, in the shape the kind's restorer reads.
 """
 
+import contextlib
 import datetime
 import json
 import os
@@ -61,6 +62,17 @@ def save(account, zone, kind, obj):
     except OSError as exc:
         raise errors.ConfigError("cannot write the backup in %s: %s; nothing was changed" % (directory, exc.strerror))
     return path
+
+
+@contextlib.contextmanager
+def naming(path):
+    """Around the write a backup was taken for: its failure names the backup,
+    which holds the state the write meant to change."""
+    try:
+        yield
+    except errors.CfError as exc:
+        exc.message = "%s; backup: %s" % (exc.message, path)
+        raise
 
 
 def list_(account=None, zone=None):
