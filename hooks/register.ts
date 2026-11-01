@@ -66,7 +66,7 @@ async function permit($: any, e: any): Promise<string | undefined> {
   if (key && sessionGrants.has(key)) return undefined
   if (!key) return ask($, describe(e) + '?', ['Allow', 'Deny'], e.command)
   const question = '« Allow for this session » also allows every later cf ' + e.command + ' on '
-    + where(e) + ' until the session ends. ' + describe(e) + '?'
+    + where(e) + inZone(e) + ' until the session ends. ' + describe(e) + '?'
   try {
     const answer = await $.ui.ask(question, ['Allow', 'Allow for this session', 'Deny'])
     if (answer === 'Allow') return undefined
@@ -93,25 +93,41 @@ function where(e: any): string {
   return e.account ? 'account ' + String(e.account).toLowerCase() : 'the default account'
 }
 
+function zoneOf(e: any): string {
+  const zone = e.args?.zone
+  return zone === undefined || zone === null ? '' : String(zone).toLowerCase()
+}
+
+function inZone(e: any): string {
+  return zoneOf(e) ? ' in zone ' + zoneOf(e) : ''
+}
+
+// The arguments that say what a write touches, shown whole and first, so that
+// the cut of a long remainder can never hide them.
+const NAMED = ['zone', 'record', 'name', 'path']
+
 function describe(e: any): string {
-  const detail = JSON.stringify(e.args ?? {})
-  return 'Run cf ' + e.command + ' on ' + where(e) + ' with '
+  const args = e.args ?? {}
+  const named = NAMED.filter((k) => args[k] !== undefined && args[k] !== null)
+    .map((k) => k + ' ' + (typeof args[k] === 'string' ? args[k] : JSON.stringify(args[k])))
+  const detail = JSON.stringify(Object.fromEntries(Object.entries(args).filter(([k]) => !NAMED.includes(k))))
+  return 'Run cf ' + e.command + ' on ' + where(e) + named.map((n) => ', ' + n).join('') + ' with '
     + (detail.length > 200 ? detail.slice(0, 199) + '…' : detail)
 }
 
-// A grant is the session's, the command's and the account's, named or the
-// default one.
+// A grant is the session's, the command's, the account's (named or the
+// default one) and the zone's.
 async function grantKey($: any, e: any): Promise<string | undefined> {
   try {
     const session = await $.session.id()
-    return session + '\n' + e.command + '\n' + where(e)
+    return session + '\n' + e.command + '\n' + where(e) + '\n' + zoneOf(e)
   } catch {
     // Without the session no grant can be scoped: ask.
     return undefined
   }
 }
 
-// The grants « Allow for this session » gave, by session, command and account.
+// The grants « Allow for this session » gave, by session, command, account and zone.
 // Kept in the module: a reload or a restart drops them, which only asks again.
 const sessionGrants = new Set<string>()
 

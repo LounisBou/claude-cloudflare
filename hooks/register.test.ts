@@ -191,6 +191,23 @@ test('an ask puts a write to the person, and Allow runs it', async ($, on) => {
   expect(runs.length).toBe(1)
 })
 
+test('the question names the command, the zone and the record before any cut', async ($, on) => {
+  const asked: string[] = []
+  await stubMod(on, [], undefined, { decision: 'ask' })
+  stubAsk(on, asked, 'Allow')
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'dns-update', { comment: 'x'.repeat(500), zone: 'example.com', record: 'www' }, 'alpha')
+  await call($, 'dns-create', { content: 'y'.repeat(500), zone: 'example.net', name: 'api' })
+  expect(asked[0]).toContain('cf dns-update')
+  expect(asked[0]).toContain('zone example.com')
+  expect(asked[0]).toContain('record www')
+  expect(asked[0]).toContain('…')
+  expect(asked[0].length).toBeLessThan(500)
+  expect(asked[1]).toContain('zone example.net')
+  expect(asked[1]).toContain('name api')
+})
+
 test('an ask on a write refused by the person runs nothing', async ($, on) => {
   const runs: any[] = []
   await stubMod(on, runs, undefined, { decision: 'ask' })
@@ -263,6 +280,26 @@ test('a grant covers neither another command nor another account', async ($, on)
   await call($, 'dns-create', { zone: 'example.com' })
   expect(asked.length).toBe(4)
   expect(runs.length).toBe(1)
+})
+
+test('a grant on one zone never covers another', async ($, on) => {
+  const runs: any[] = []
+  const asked: string[] = []
+  await stubMod(on, runs, undefined, { decision: 'ask' })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$: any, e: any) => {
+    const question = e.questions[0].question
+    asked.push(question)
+    const answer = asked.length === 1 ? 'Allow for this session' : 'Deny'
+    return { result: { questions: e.questions, answers: { [question]: answer } } }
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+
+  await call($, 'dns-create', { zone: 'example.com', name: 'a' }, 'alpha')
+  await call($, 'dns-create', { zone: 'example.com', name: 'b' }, 'alpha')
+  await call($, 'dns-create', { zone: 'example.net', name: 'a' }, 'alpha')
+  expect(asked.length).toBe(2)
+  expect(asked[0]).toContain('zone example.com')
+  expect(runs.length).toBe(2)
 })
 
 test('the writes that are never granted are offered Allow and Deny only', async ($, on) => {
