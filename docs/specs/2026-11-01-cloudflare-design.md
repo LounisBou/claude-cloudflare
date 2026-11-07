@@ -1,39 +1,39 @@
 # Plugin `cloudflare` — Cloudflare et Caddy pour les agents Claude Code
 
-Conception, 2026-11-01. Auteur : `Orch : Cloudflare config`, à partir des réponses d'izno (opérateur).
-Ce qui est la décision d'izno est marqué **(izno)** ; ce qui est un choix de l'auteur, **(choix)**.
+Conception, 2026-11-01. Auteur : `Orch : Cloudflare config`, à partir des réponses de l'opérateur.
+Ce qui est la décision de l'opérateur est marqué **(opérateur)** ; ce qui est un choix de l'auteur, **(choix)**.
 
 ## 1. Intention
 
-Gérer Cloudflare et Caddy va devenir récurrent (izno). Aujourd'hui, chaque modification est faite à la
+Gérer Cloudflare et Caddy va devenir récurrent (opérateur). Aujourd'hui, chaque modification est faite à la
 main ou par des scripts jetables d'une session (`curl` + `jq`), sans garde-fous communs : la session du
 2026-11-01 a montré ce que ça coûte — 15 sous-domaines proxifiés morts depuis des mois parce qu'Universal
 SSL était coupé, un token en clair dans le Caddyfile, un `caddy reload` qui casse s'il est lancé sans le
 token chargé. Le plugin donne aux agents des **scripts API** fiables, qui consomment **le moins de tokens
-possible** (izno), et la **connaissance de Caddy** pour bien configurer un service (izno).
+possible** (opérateur), et la **connaissance de Caddy** pour bien configurer un service (opérateur).
 
 ## 2. Objectifs
 
-### Cloudflare (izno)
-- **Comptes désignés par nom** : `izno` (perso, zone `iznogoudatall.xyz`, l'actuel), `geonative` (pro,
+### Cloudflare (opérateur)
+- **Comptes désignés par nom** : `perso` (perso, zone `example.com`, l'actuel), `pro` (pro,
   plus tard), d'autres ensuite. Les identifiants de chaque compte suivent le motif
-  `{NOM}_CLOUDFLARE_*` (ex. `IZNO_CLOUDFLARE_API_TOKEN`, `IZNO_CLOUDFLARE_ACCOUNT_ID`), lus dans
+  `{NOM}_CLOUDFLARE_*` (ex. `PERSO_CLOUDFLARE_API_TOKEN`, `PERSO_CLOUDFLARE_ACCOUNT_ID`), lus dans
   l'environnement ou dans `~/.env`. Toute commande prend le compte en paramètre ; un compte par
   défaut est configurable.
 - **DNS, toutes zones du compte** : lister les zones ; lister, créer, modifier, supprimer des
   enregistrements (tous types, proxifié ou non) ; exporter une zone.
-- **Protections, tous types** (izno : « pas que par pays », « toutes les protections nécessaires ») :
+- **Protections, tous types** (opérateur : « pas que par pays », « toutes les protections nécessaires ») :
   règles de pare-feu personnalisées (expressions, dont pays/ASN/IP/chemin/user-agent), limitation de
   débit, règles gérées (WAF managé), règles d'accès IP, mode anti-bots, niveau de sécurité,
   « Under Attack ». Mise en place **facile** : un agent doit pouvoir appliquer « bloquer tout sauf la
-  France sur tm.iznogoudatall.xyz » en un appel, pas en composant un JSON de ruleset à la main.
+  France sur app.example.com » en un appel, pas en composant un JSON de ruleset à la main.
 - **Cache** sur les entrées proxifiées : règles de cache par hôte/chemin, purge (tout, par URL, par hôte).
 - **Workers** : lister, déployer un script, supprimer, gérer les routes et domaines personnalisés.
-- **Réglages de base** (izno : « fonctionnalités de base auxquelles je n'aurais pas pensé ») : SSL/TLS
+- **Réglages de base** (opérateur : « fonctionnalités de base auxquelles je n'aurais pas pensé ») : SSL/TLS
   (mode, Universal SSL, version min, TLS 1.3, Always Use HTTPS) ; état des certificats de bord ;
   vérification du token.
 
-### Caddy (izno)
+### Caddy (opérateur)
 - Ajouter, modifier, retirer **un bloc par service** dans le Caddyfile.
 - Avant rechargement : **validation de syntaxe** (`caddy validate`).
 - Rechargement **à chaud** (`caddy reload`), jamais d'arrêt.
@@ -43,7 +43,7 @@ possible** (izno), et la **connaissance de Caddy** pour bien configurer un servi
   configure au mieux selon le besoin (reverse_proxy, en-têtes, auth, compression, cache, websockets,
   matchers, handle, TLS…).
 
-### Commandes combinées (choix, validé par izno sur le résumé)
+### Commandes combinées (choix, validé par l'opérateur sur le résumé)
 - `publish` : enregistrement A (proxifié par défaut) + bloc Caddy + validate + reload + vérification HTTPS.
 - `unpublish` : l'inverse.
 - `inventory` : sauvegarde de la zone, réglages SSL, correspondance DNS ↔ blocs Caddy (sous-domaines sans
@@ -55,41 +55,41 @@ possible** (izno), et la **connaissance de Caddy** pour bien configurer un servi
 
 - Pas d'interface graphique ni de panneau (choix ; à rouvrir plus tard si utile).
 - Pas de couverture des produits Cloudflare non cités : R2, D1, KV, Pages, Zero Trust/Tunnel, Email
-  Routing (choix — Tunnel/Access pour SSH est une piste séparée, proposée à izno le 2026-11-01).
+  Routing (choix — Tunnel/Access pour SSH est une piste séparée, proposée à l'opérateur le 2026-11-01).
 - Pas de gestion d'un Caddy distant ni de plusieurs instances Caddy (choix : un Caddy local par machine,
   le plugin installé sur chaque machine qui a un Caddy).
-- Pas de choix des protections par domaine : c'est un chantier d'izno, à faire **avec** le plugin ensuite.
+- Pas de choix des protections par domaine : c'est un chantier de l'opérateur, à faire **avec** le plugin ensuite.
 
 ## 4. Anti-objectifs (échec même si ça « marche »)
 
 - Passer par l'API d'administration de Caddy (`:2019`) pour modifier la config : le Caddyfile reprend le
   dessus au rechargement suivant, la modification se perd. **Le Caddyfile est la seule source de vérité.**
 - Un token qui apparaît dans une sortie, un log, un argument de processus (`ps`) ou un fichier du dépôt.
-- Une modification sans confirmation (izno, réponse 2).
+- Une modification sans confirmation (opérateur, réponse 2).
 - Une modification de zone sans sauvegarde préalable restaurable.
 - Un rechargement qui laisse Caddy sur une config cassée ou un site qui ne répond plus sans retour arrière.
 - Des sorties verbeuses (JSON brut de l'API) qui gaspillent le contexte des agents.
-- Quoi que ce soit de propre à une machine dans le dépôt (règle d'izno : zone, IP, chemins, noms
+- Quoi que ce soit de propre à une machine dans le dépôt (règle de l'opérateur : zone, IP, chemins, noms
   d'hôte vont dans une config locale).
 
 ## 5. Contraintes
 
-- **Modèle du dépôt** (choix, sur le modèle de `LounisBou/claude-github`, prior art d'izno) : dépôt
+- **Modèle du dépôt** (choix, sur le modèle de `LounisBou/claude-github`, prior art de l'opérateur) : dépôt
   `LounisBou/claude-cloudflare`, plugin `cloudflare`, inscrit dans la marketplace `lounisbou`
   (`LounisBou/claude-plugins-marketplace`). Un **outil natif** (mod `hooks/register.ts` via
   `$.tool.register`, comme `mcp__github__gh`) façade d'un **moteur Python 3.9+ en bibliothèque
   standard seule** (`engine/cf.py`, requête JSON sur stdin, pas d'argv) ; une **skill de repli**
   (comme `github-curl`) qui lance le même moteur en Bash là où les mods ne se chargent pas
   (`claude -p`) ; `/cloudflare:install` et `/cloudflare:doctor`.
-- **Confirmation des modifications** (izno : « tout le monde pourra le faire avec des demandes de
+- **Confirmation des modifications** (opérateur : « tout le monde pourra le faire avec des demandes de
   confirmation pour les modifications ») : comme `claude-github`, une liste `READS` des commandes de
   lecture ; **toute commande absente de la liste est une écriture** ; une écriture passe par la
   vérification de permission de Claude Code (demande à l'utilisateur, règles `allow/ask/deny`
   respectées). La lecture passe sans demande.
-- **Jusqu'à nouvel ordre** (izno, réponse 2 « A pour aujourd'hui ») : seul `Orch : Cloudflare config`
+- **Jusqu'à nouvel ordre** (opérateur, réponse 2 « A pour aujourd'hui ») : seul `Orch : Cloudflare config`
   modifie la zone et le Caddyfile ; les autres sessions lisent et demandent. Le plugin ne code pas
   cette règle, il la rend possible plus tard.
-- **Sobriété en tokens** (izno) : sorties texte compactes par défaut (une ligne par enregistrement,
+- **Sobriété en tokens** (opérateur) : sorties texte compactes par défaut (une ligne par enregistrement,
   tableau court), `--json` sur demande ; la fiche de référence de l'outil est courte, et la doc Caddy
   est découpée en fiches par sujet que l'agent ouvre seulement au besoin.
 - **Secrets** : tokens lus dans l'environnement ou `~/.env` (motif `{NOM}_CLOUDFLARE_*`), jamais
@@ -100,7 +100,7 @@ possible** (izno), et la **connaissance de Caddy** pour bien configurer un servi
   connus et compte par défaut, IP publique de cible par défaut, chemin du binaire `caddy`, du
   Caddyfile, du fichier d'env du token, du répertoire de sauvegarde, snippet TLS à importer
   (`tls_config` ici). Une machine sans Caddy n'a que la partie Cloudflare.
-- **Règles de la machine IznoServer** (`~/CLAUDE.md`, `~/MEMORY.md`) : jamais d'arrêt de Caddy ; une
+- **Règles de la machine home-server** (`~/CLAUDE.md`, `~/MEMORY.md`) : jamais d'arrêt de Caddy ; une
   sauvegarde du Caddyfile avant chaque édition ; `caddy validate` avant `caddy reload`.
 
 ## 6. Comportements décidés
@@ -113,7 +113,7 @@ possible** (izno), et la **connaissance de Caddy** pour bien configurer un servi
   relevé « avant » des sites → `reload` → Caddy toujours vivant (API admin `GET /config/` en lecture,
   processus présent) → relevé « après » de **tous** les sites du Caddyfile → si un site change de
   classe de réponse (répondait, ne répond plus), restaurer la sauvegarde, recharger, et rapporter.
-- **Proxifié par défaut** (choix, conforme à la décision d'izno du 2026-11-01) : `publish` crée un A
+- **Proxifié par défaut** (choix, conforme à la décision de l'opérateur du 2026-11-01) : `publish` crée un A
   proxifié ; `--no-proxy` pour l'exception (ex. Plex, `home`).
 - **Garde SSL** (choix, leçon du 2026-11-01) : `publish` en proxifié refuse si Universal SSL est coupé
   ou si le mode SSL n'est pas `full`/`strict`, et dit pourquoi.
@@ -122,7 +122,7 @@ possible** (izno), et la **connaissance de Caddy** pour bien configurer un servi
   composent le ruleset, plus une commande bas niveau qui pose une expression Cloudflare brute pour
   tout le reste.
 
-- **Forfaits** (choix) : la zone `iznogoudatall.xyz` est en **Free** (constaté le 2026-11-01) ; le
+- **Forfaits** (choix) : la zone `example.com` est en **Free** (constaté le 2026-11-01) ; le
   forfait d'une zone future est inconnu. Le moteur lit le forfait de la zone et ses quotas (règles
   personnalisées, limitation de débit, règles gérées, bots) et **refuse clairement** ce que le
   forfait n'offre pas, au lieu d'échouer sur une erreur d'API. Sur Free, les protections par hôte sont
@@ -138,14 +138,14 @@ possible** (izno), et la **connaissance de Caddy** pour bien configurer un servi
   poignée TLS et rendait une réponse HTTP avant, et qu'après il échoue en connexion ou en TLS. Un
   changement de code HTTP (502 compris : service arrêté derrière) n'est pas une casse ; il est
   rapporté. Caddy non vivant après rechargement = casse.
-- **Confirmation** (choix, sur le modèle de `claude-github`, convention existante d'izno) : une
+- **Confirmation** (choix, sur le modèle de `claude-github`, convention existante de l'opérateur) : une
   demande par commande d'écriture — `publish` est **une** demande pour tout son cycle ; sauvegardes et
   retour arrière automatiques font partie de la commande confirmée. Les règles `allow/ask/deny` et les
   autorisations « pour la session » de Claude Code sont celles de l'utilisateur et sont respectées.
   Dans la skill de repli Bash, les écritures passent par un point d'entrée distinct
   (`cf-write.py` vs `cf.py`) pour que des règles de permission Bash puissent les distinguer.
-- **Machines** (izno, 2026-11-01 : « B ») : la partie Caddy gère **macOS avec Caddy Homebrew/launchd**
-  (IznoServer) **et Linux avec Caddy sous systemd**. La config locale déclare le gestionnaire
+- **Machines** (opérateur, 2026-11-01 : « B ») : la partie Caddy gère **macOS avec Caddy Homebrew/launchd**
+  (home-server) **et Linux avec Caddy sous systemd**. La config locale déclare le gestionnaire
   (`launchd` ou `systemd`), les chemins, et la façon de lancer `caddy` avec les droits requis (sous
   Linux, Caddyfile et service souvent à root : `sudo` explicite, déclaré dans la config, jamais
   supposé). Règle commune : `caddy validate` puis `caddy reload`, jamais d'arrêt ni de
