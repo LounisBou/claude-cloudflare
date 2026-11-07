@@ -133,8 +133,10 @@ On a machine with a Caddy, the config's `caddy` section names its files:
 ```
 
 `manager` is `launchd` (macOS) or `systemd` (Linux); `sudo: true` runs every
-caddy call as `sudo -n`, and reads or writes the Caddyfile and its copies
-through `sudo -n cat`, `tee` and `cp -p` when the user cannot. The Caddyfile
+caddy call as `sudo -n`, and reads or writes the Caddyfile through `sudo -n
+cat` and `tee` when the user cannot. A copy is written beside the Caddyfile,
+or, when its directory is not the user's to write, in `<backup_dir>/caddy/`,
+private to the user: no privileged command ever makes one. The Caddyfile
 is the only source of truth: nothing is written through the admin API, and
 Caddy is never stopped or restarted.
 
@@ -145,10 +147,18 @@ With the paths `command -v` gives, for example in `/etc/sudoers.d/caddy`
 (edited with `visudo -f`):
 
 ```
-deploy ALL=(root) NOPASSWD: SETENV: /usr/bin/caddy version, /usr/bin/caddy validate *, /usr/bin/caddy reload *, \
-    /usr/bin/cat /etc/caddy/Caddyfile, /usr/bin/tee /etc/caddy/Caddyfile, \
-    /usr/bin/cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-*
+deploy ALL=(root) NOPASSWD: SETENV: /usr/bin/caddy version, \
+    /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile, \
+    /usr/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile, \
+    /usr/bin/cat /etc/caddy/Caddyfile, /usr/bin/tee /etc/caddy/Caddyfile
 ```
+
+Every command is named with its exact arguments, never with `*`: in a sudoers
+rule `*` also matches spaces, so `cp … /etc/caddy/Caddyfile.bak-*` or
+`caddy validate *` would let the deploy user run them as root on any path. An
+admin API other than the default adds `--address <host:port>` to the reload
+line, exactly as the config names it. A rule written from an earlier version
+of this section should be replaced by this one.
 
 A refusal of sudo is exit 4 and names the rule: before any write nothing is
 changed, after one the Caddyfile is put back; it is never read as a failed
