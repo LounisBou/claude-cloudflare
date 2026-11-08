@@ -2113,11 +2113,11 @@ if user_only "the files only root can read or write, through sudo"; then
   chmod 755 "$CADDY/etc"
   check "with sudo: true, a Caddyfile and a directory the user cannot write are written through sudo -n" "0 same" \
     "$CODE $(same "$CADDYFILE" "$FIXTURES/caddy/expected-set-new")"
-  check "…the copy by cp, the file by tee, then caddy" \
-    "$(printf 'cp -p %s %s\ntee %s\n%s validate\n%s reload' "$CADDYFILE" "$copy" "$CADDYFILE" "$FAKE_CADDY" "$FAKE_CADDY")" \
+  check "…the file by tee, then caddy; no copy goes through sudo" \
+    "$(printf 'tee %s\n%s validate\n%s reload' "$CADDYFILE" "$FAKE_CADDY" "$FAKE_CADDY")" \
     "$(sudo_lines | cut -d' ' -f1-4 | sed -E "s#^($FAKE_CADDY [a-z]+).*#\1#")"
-  check "…the copy holds the Caddyfile as it was, the file keeps its mode" "same 444" \
-    "$(same "$copy" "$ORIGINAL") $(stat -f '%Lp' "$CADDYFILE" 2>/dev/null || stat -c '%a' "$CADDYFILE")"
+  check "…the copy holds the Caddyfile as it was, under the backup dir, private; the file keeps its mode" "same caddy 600 444" \
+    "$(same "$copy" "$ORIGINAL") $(basename "$(dirname "$copy")") $(stat -c '%a' "$copy" 2>/dev/null || stat -f '%Lp' "$copy") $(stat -c '%a' "$CADDYFILE" 2>/dev/null || stat -f '%Lp' "$CADDYFILE")"
   chmod 644 "$CADDYFILE"
 
   caddy_reset

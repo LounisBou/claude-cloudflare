@@ -6,8 +6,8 @@ The envfile's variables reach caddy through the environment of the child
 process, never its argument vector. With "sudo": true every caddy call is
 prefixed with sudo -n, which keeps those variables by name
 (--preserve-env=NAMES): a password prompt fails instead of waiting. The
-Caddyfile and its copies go through sudo -n too (cat, tee, cp -p) when the
-user cannot read or write them; a refusal of sudo names the rule it needs.
+Caddyfile goes through sudo -n too (cat, tee) when the
+user cannot read or write it; a refusal of sudo names the rule it needs.
 Nothing here stops, starts or restarts the service: caddy is only validated
 and reloaded.
 """
@@ -163,6 +163,7 @@ class Settings:
         self.service = path("service")
         self.tls_snippet = value("tls_snippet")
         self.sudo = value("sudo", bool, False)
+        self.config = config
         self.admin = value("admin", default=DEFAULT_ADMIN)
         if "/" in self.admin:
             raise errors.ConfigError("%s: caddy.admin must be host:port; an admin API on a unix socket "
@@ -216,25 +217,24 @@ class Settings:
             fh.write(text.encode("utf-8"))
 
     def copy(self, text):
-        """<caddyfile>.bak-<UTC timestamp>, private, never over an older one.
-        Where the user cannot write, sudo -n cp -p makes it from the file,
-        which then holds the text: the copy has the Caddyfile's owner and mode."""
+        """A private copy of the Caddyfile as it was, never over an older one:
+        <caddyfile>.bak-<UTC timestamp> beside it, or, where the user cannot
+        write beside it, the same name in backup_dir/caddy/. No privileged
+        command makes it, so the sudoers rule names every argument exactly."""
         taken = datetime.datetime.now(datetime.timezone.utc)
-        through_sudo = self.sudo and not os.access(os.path.dirname(self.caddyfile) or ".", os.W_OK)
+        beside = os.access(os.path.dirname(self.caddyfile) or ".", os.W_OK)
+        copies = os.path.join(self.config.backup_dir, "caddy")
+        base = self.caddyfile if beside else os.path.join(copies, os.path.basename(self.caddyfile))
         try:
+            if not beside:
+                os.makedirs(copies, mode=0o700, exist_ok=True)
             while True:
-                path = "%s.bak-%s" % (self.caddyfile, taken.strftime(_STAMP))
-                if through_sudo:
-                    if not os.path.lexists(path):
-                        self._sudo(["cp", "-p", self.caddyfile, path])
-                        return path
-                else:
-                    try:
-                        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                        break
-                    except FileExistsError:
-                        pass
-                taken += datetime.timedelta(microseconds=1)
+                path = "%s.bak-%s" % (base, taken.strftime(_STAMP))
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    break
+                except FileExistsError:
+                    taken += datetime.timedelta(microseconds=1)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(text.encode("utf-8"))
         except OSError as exc:

@@ -77,7 +77,7 @@ engine/cflib/<domain>.py  each: register(subparsers) and handlers run(args, ctx)
 
 ```json
 {
-  "default_account": "izno",
+  "default_account": "perso",
   "env_files": ["~/.env"],
   "backup_dir": "~/.local/share/claude-cloudflare/backups",
   "default_target": "203.0.113.10",
@@ -180,6 +180,6 @@ phase).
 
 1. Marketplace: add `cloudflare` (source github `LounisBou/claude-cloudflare`) to the `lounisbou`
    marketplace repository.
-2. Deploy on IznoServer: install the plugin, write `~/.config/claude-cloudflare/config.json` (values
+2. Deploy on home-server: install the plugin, write `~/.config/claude-cloudflare/config.json` (values
    of C2), `/cloudflare:doctor` green, `inventory` read-only run compared with the 2026-11-01 manual
    inventory.
